@@ -9,6 +9,7 @@
 
 #include "../core/cpu/algorithms.hpp"
 #include "../core/cpu/algorithms_omp.hpp"
+#include "../core/cpu/louvain.hpp"
 #include "../core/graph/csr.hpp"
 #include "../core/graph/generator.hpp"
 
@@ -95,6 +96,34 @@ int main() {
         for (VertexId v = 0; v < big.num_vertices; ++v)
             maxerr = std::max(maxerr, std::abs(ps[v] - pp[v]));
         CHECK(maxerr < 1e-9, "OpenMP PageRank matches sequential within 1e-9");
+    }
+
+    // ====================================================================
+    // Louvain (T0). The test graph has two obvious communities: the 4-cycle
+    // {0,1,2,3} and the triangle {4,5,6}, joined by nothing. Louvain must find
+    // exactly those two, with positive modularity.
+    // ====================================================================
+    {
+        auto lr = seq::louvain(g);
+        CHECK(lr.num_communities == 2, "Louvain finds 2 communities on the test graph");
+        CHECK(lr.modularity > 0.3, "Louvain modularity is high (>0.3) for clear structure");
+        CHECK(lr.community[0] == lr.community[1] &&
+              lr.community[1] == lr.community[2] &&
+              lr.community[2] == lr.community[3],
+              "Louvain groups the 4-cycle {0,1,2,3} together");
+        CHECK(lr.community[4] == lr.community[5] &&
+              lr.community[5] == lr.community[6],
+              "Louvain groups the triangle {4,5,6} together");
+        CHECK(lr.community[0] != lr.community[4],
+              "Louvain separates the two communities");
+    }
+    // Louvain on a larger graph: modularity must be a valid, positive value.
+    {
+        auto lr = seq::louvain(big);
+        CHECK(lr.modularity > 0.0 && lr.modularity <= 1.0,
+              "Louvain modularity in valid range on RMAT graph");
+        CHECK(lr.num_communities >= 1 && lr.num_communities <= big.num_vertices,
+              "Louvain community count is sane on RMAT graph");
     }
 
     std::cout << "\n" << (failures ? "TESTS FAILED: " : "ALL TESTS PASSED (")

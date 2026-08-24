@@ -8,7 +8,7 @@ BIN=${BIN:-./build/run_bench}
 OUT=${1:-results/benchmarks.csv}
 mkdir -p "$(dirname "$OUT")"
 
-ALGOS=(bfs pagerank wcc)
+ALGOS=(bfs pagerank wcc)   # louvain runs seq-only; add it below if desired
 TIERS=(seq openmp)         # add: cuda ... in later phases
 # RMAT graphs: "scale edge_factor"
 RMATS=("14 16" "16 16" "18 8" "18 16")

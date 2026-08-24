@@ -13,7 +13,7 @@ This is an **empirical study**, not a claim of a new algorithm. Its value — li
   <a href="#references">References</a>
 </p>
 
-> **Status:** 🚧 Phases 1–2 complete — sequential (T0) and OpenMP (T1) tiers for BFS / PageRank / WCC, all validated against the T0 oracle. First real thread-scaling results below. GPU tiers (T2+) are next on the [roadmap](#roadmap).
+> **Status:** 🚧 Phases 1–2 complete — sequential (T0) and OpenMP (T1) tiers for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. All validated against the T0 oracle. First real thread-scaling results below. GPU tiers (T2+) are next on the [roadmap](#roadmap).
 
 ---
 
@@ -41,7 +41,7 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 | **BFS** | ✅ | ✅ | ⬜ | ⬜ | ⬜ |
 | **PageRank** | ✅ | ✅ | ⬜ | ⬜ | ⬜ |
 | **Connected Components (WCC)** | ✅ | ✅ | ⬜ | ⬜ | ⬜ |
-| **Community Detection (Louvain)** | ⬜ | ⬜ | ⬜ | ⬜ | — |
+| **Community Detection (Louvain)** | ✅ | ⬜ | ⬜ | ⬜ | — |
 
 **What each tier isolates**
 
@@ -125,14 +125,22 @@ ctest --test-dir build --output-on-failure     # correctness oracle
 # BFS on a synthetic power-law graph (2^18 vertices, avg degree 16)
 ./build/run_bench --algo bfs --tier seq --rmat 18 --ef 16 --source 0
 
-# PageRank / WCC on a graph file
-./build/run_bench --algo pagerank --tier seq --graph data/graphs/sample.edges
-./build/run_bench --algo wcc      --tier seq --graph data/graphs/sample.edges
+# OpenMP tier (set threads via OMP_NUM_THREADS)
+OMP_NUM_THREADS=8 ./build/run_bench --algo pagerank --tier openmp --rmat 20 --ef 16
+
+# PageRank / WCC / Louvain on a graph file
+./build/run_bench --algo wcc     --tier seq --graph data/graphs/sample.edges
+./build/run_bench --algo louvain --tier seq --graph data/graphs/sample.edges
+
+# Turn a real binary into a call-graph, then analyze it
+python tools/extract_callgraph.py --binary /bin/ls --out data/graphs/ls --stats
+./build/run_bench --algo louvain --tier seq --graph data/graphs/ls.edges
 
 # Full benchmark sweep -> results/benchmarks.csv
 ./scripts/run_benchmarks.sh results/benchmarks.csv
 ```
 Each run prints one CSV row: `algo,tier,graph,vertices,edges,max_degree,avg_degree,median_ms,summary`.
+On Windows use `build\Release\run_bench.exe` and set threads with `$env:OMP_NUM_THREADS=8`.
 
 ---
 

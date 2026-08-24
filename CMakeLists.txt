@@ -18,6 +18,7 @@ add_library(ggs_core
   core/graph/generator.cpp
   core/cpu/algorithms.cpp
   core/cpu/algorithms_omp.cpp
+  core/cpu/louvain.cpp
 )
 target_include_directories(ggs_core PUBLIC ${CMAKE_SOURCE_DIR})
 

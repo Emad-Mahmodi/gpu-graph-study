@@ -18,6 +18,7 @@
 #include "../bench/timer.hpp"
 #include "../core/cpu/algorithms.hpp"
 #include "../core/cpu/algorithms_omp.hpp"
+#include "../core/cpu/louvain.hpp"
 #include "../core/graph/csr.hpp"
 #include "../core/graph/generator.hpp"
 
@@ -117,6 +118,17 @@ int main(int argc, char** argv) {
             lbl = seq_tier ? seq::wcc(g) : omp::wcc(g);
         }, a.repeats);
         result_summary = "components=" + std::to_string(seq::count_components(lbl));
+    } else if (a.algo == "louvain") {
+        if (omp_tier) {
+            std::cerr << "louvain has no OpenMP tier yet; use --tier seq.\n";
+            return 3;
+        }
+        seq::LouvainResult lr;
+        ms = time_median_ms([&]{ lr = seq::louvain(g); }, a.repeats);
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "communities=%u modularity=%.4f levels=%d",
+                      lr.num_communities, lr.modularity, lr.levels);
+        result_summary = buf;
     } else {
         std::cerr << "unknown algo: " << a.algo << "\n";
         return 3;

@@ -3,7 +3,10 @@ build/
 *.obj
 *.csr
 data/graphs/*.edges
+data/graphs/*.map
 !data/graphs/sample.edges
+!data/graphs/ls.edges
+!data/graphs/ls.map
 results/*.csv
 !results/.gitkeep
 .DS_Store
