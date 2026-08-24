@@ -1,0 +1,8 @@
+# sample.edges — tiny two-component demo graph
+0 1
+1 2
+2 3
+0 3
+4 5
+5 6
+4 6

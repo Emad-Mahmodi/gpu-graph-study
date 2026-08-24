@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "A Reproducible Empirical Study of GPU Graph-Analytics Strategies on Irregular Security Graphs"
+authors:
+  - family-names: "Mahmodi"
+    given-names: "Emad"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"  # TODO
+repository-code: "https://github.com/Emad-Mahmodi/gpu-graph-study"  # TODO confirm repo name
+license: MIT
+date-released: 2026-08-24
+keywords:
+  - GPU
+  - graph analytics
+  - CUDA
+  - high-performance computing
+  - binary analysis
+  - intrusion detection

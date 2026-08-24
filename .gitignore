@@ -1,0 +1,12 @@
+build/
+*.o
+*.obj
+*.csr
+data/graphs/*.edges
+!data/graphs/sample.edges
+results/*.csv
+!results/.gitkeep
+.DS_Store
+*.nsys-rep
+*.ncu-rep
+__pycache__/
