@@ -198,11 +198,7 @@ Detailed weekly milestones in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 See `CITATION.cff`.
 
 ## License
-«MIT» — see `LICENSE`. Extracted graphs retain the license of their source; see `data/README.md`.
+MIT — see `LICENSE`. Extracted graphs retain the license of their source; see `data/README.md`.
 
 ## Author
-<<<<<<< HEAD
-**Emad Mahmodi** · [portfolio](https://emad-mahmodi.github.io) ·
-=======
 **Emad Mahmodi** · [portfolio](https://emad-mahmodi.github.io)
->>>>>>> 9d2c23c (docs: fill hardware specs (i7-11850H, T600), remove placeholders)
