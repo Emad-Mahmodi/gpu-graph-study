@@ -14,8 +14,16 @@ python tools/extract_callgraph.py --binary /bin/ls --out data/graphs/ls --stats
 # -> data/graphs/ls.map     (vertex id -> function name)
 ```
 
-Only needs `objdump` (GNU binutils) on PATH — no angr/Ghidra. Works on any ELF
-or PE binary objdump can disassemble.
+Needs a disassembler on PATH — either GNU `objdump` or LLVM's `llvm-objdump`
+(auto-detected; override with `--objdump <path>`). No angr/Ghidra. Works on any
+ELF or PE binary the disassembler can handle.
+
+On Windows, the quickest way to get one is LLVM:
+```powershell
+winget install LLVM.LLVM       # provides llvm-objdump
+# reopen the shell, then:
+python tools\extract_callgraph.py --binary C:\Windows\System32\notepad.exe --out data\graphs\notepad --stats
+```
 
 **On graph shape:** call-graphs of *large, statically-linked* binaries are
 strongly power-law — a few hot helpers (allocators, logging, string ops) are

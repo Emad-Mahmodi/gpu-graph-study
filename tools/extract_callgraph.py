@@ -21,11 +21,31 @@ Usage:
 
     python tools/extract_callgraph.py --binary a.out --out g --stats
 """
+from __future__ import annotations  # allow "str | None" hints on Python < 3.10
+
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+# Disassemblers we know how to drive, in preference order. GNU objdump and
+# LLVM's llvm-objdump produce compatible-enough output for the regexes below.
+DISASSEMBLERS = ['objdump', 'llvm-objdump']
+
+
+def find_disassembler(preferred: str | None) -> str:
+    """Locate objdump / llvm-objdump on PATH (or use --objdump override)."""
+    candidates = [preferred] if preferred else DISASSEMBLERS
+    for c in candidates:
+        if c and shutil.which(c):
+            return c
+    sys.exit(
+        "error: no disassembler found. Install one of:\n"
+        "  - LLVM (gives llvm-objdump):  winget install LLVM.LLVM\n"
+        "  - GNU binutils (objdump)   :  via MSYS2 / your package manager\n"
+        "Then reopen the shell, or pass --objdump <path>.")
 
 # A function header line in objdump output, e.g.
 #   0000000000001234 <malloc>:
@@ -39,17 +59,24 @@ FUNC_RE = re.compile(r'^[0-9a-fA-F]+\s+<([^>]+)>:')
 CALL_RE = re.compile(r':\s*(?:call|callq|bl|blx|jal)\w*\s+.*<([^>+]+)(?:\+0x[0-9a-fA-F]+)?>')
 
 
-def disassemble(binary: str) -> str:
-    """Return objdump disassembly text, or exit with a clear message."""
-    try:
-        out = subprocess.run(
-            ['objdump', '-d', '--no-show-raw-insn', binary],
-            capture_output=True, text=True, check=True)
-        return out.stdout
-    except FileNotFoundError:
-        sys.exit("error: 'objdump' not found. Install GNU binutils and retry.")
-    except subprocess.CalledProcessError as e:
-        sys.exit(f"error: objdump failed on {binary}:\n{e.stderr.strip()}")
+def disassemble(binary: str, tool: str) -> str:
+    """Return disassembly text from objdump / llvm-objdump, or exit clearly."""
+    # llvm-objdump uses -d and understands --no-show-raw-insn too (recent
+    # versions); older ones ignore it harmlessly, so we keep a fallback.
+    cmds = [
+        [tool, '-d', '--no-show-raw-insn', binary],
+        [tool, '-d', binary],
+    ]
+    last_err = ''
+    for cmd in cmds:
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            return out.stdout
+        except FileNotFoundError:
+            sys.exit(f"error: '{tool}' not found on PATH.")
+        except subprocess.CalledProcessError as e:
+            last_err = e.stderr.strip()
+    sys.exit(f"error: {tool} failed on {binary}:\n{last_err}")
 
 
 def normalize(name: str) -> str:
@@ -91,12 +118,16 @@ def main():
     ap.add_argument('--out', required=True,
                     help='output basename; writes <out>.edges and <out>.map')
     ap.add_argument('--stats', action='store_true', help='print graph statistics')
+    ap.add_argument('--objdump', default=None,
+                    help='disassembler to use (objdump / llvm-objdump / full path); '
+                         'auto-detected if omitted')
     args = ap.parse_args()
 
     if not Path(args.binary).exists():
         sys.exit(f"error: binary not found: {args.binary}")
 
-    disasm = disassemble(args.binary)
+    tool = find_disassembler(args.objdump)
+    disasm = disassemble(args.binary, tool)
     edges, id_of = build_callgraph(disasm)
 
     n = len(id_of)
