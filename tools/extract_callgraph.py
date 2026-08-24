@@ -149,6 +149,19 @@ def main():
     print(f'wrote {args.out}.edges  ({n} vertices, {len(edges)} edges)')
     print(f'wrote {args.out}.map')
 
+    # Stripped binaries expose no function symbols — only section labels like
+    # ".text" — so no call-graph can be recovered this way. Say so plainly.
+    only_sections = all(name.startswith('.') for name in id_of)
+    if n <= 1 or len(edges) == 0 or only_sections:
+        print('\nwarning: almost no functions/edges were found. This binary is '
+              'likely STRIPPED (no symbols) — e.g. a production Windows system\n'
+              '         binary. A lightweight objdump pass cannot recover a '
+              'function-level call graph from it.\n'
+              '         Use a binary WITH symbols (a locally compiled / '
+              'non-stripped binary), or a proper RE tool (Ghidra/angr) for\n'
+              '         stripped targets. The bundled data/graphs/ls.edges is a '
+              'ready symbol-based example.', file=sys.stderr)
+
     if args.stats and n:
         outdeg = [0] * n
         indeg = [0] * n
