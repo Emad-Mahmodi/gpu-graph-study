@@ -206,4 +206,4 @@ See `CITATION.cff`.
 «MIT» — see `LICENSE`. Extracted graphs retain the license of their source; see `data/README.md`.
 
 ## Author
-**Emad Mahmodi** · [portfolio](https://emad-mahmodi.github.io) · [Google Scholar](«TODO»)
+**Emad Mahmodi** · [portfolio](https://emad-mahmodi.github.io) ·
