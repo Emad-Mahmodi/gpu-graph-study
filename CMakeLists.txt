@@ -6,13 +6,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
-set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+# Optimization flags differ by compiler: MSVC uses /O2 (its Release default),
+# GCC/Clang use -O3.
+if(NOT MSVC)
+  set(CMAKE_CXX_FLAGS_RELEASE "-O3")
+endif()
 
 # --- Core engine library (Tier T0 today; OpenMP/CUDA tiers added later) ----
 add_library(ggs_core
   core/graph/csr.cpp
   core/graph/generator.cpp
   core/cpu/algorithms.cpp
+  core/cpu/algorithms_omp.cpp
 )
 target_include_directories(ggs_core PUBLIC ${CMAKE_SOURCE_DIR})
 

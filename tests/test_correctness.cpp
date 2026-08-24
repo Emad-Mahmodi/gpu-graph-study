@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "../core/cpu/algorithms.hpp"
+#include "../core/cpu/algorithms_omp.hpp"
 #include "../core/graph/csr.hpp"
 #include "../core/graph/generator.hpp"
 
@@ -65,6 +66,36 @@ int main() {
     // Determinism: same seed => identical graph.
     CsrGraph r2 = make_rmat(10, 8, 42);
     CHECK(r.col_indices == r2.col_indices, "rmat is deterministic given a seed");
+
+    // ====================================================================
+    // Tier T1 (OpenMP) must match the T0 oracle on a larger, skewed graph.
+    // This is the guarantee that parallelization did not change results.
+    // ====================================================================
+    CsrGraph big = make_rmat(/*scale=*/14, /*ef=*/16, /*seed=*/7);
+
+    // BFS: identical distances from a fixed source.
+    {
+        auto ds = seq::bfs(big, 0);
+        auto dp = omp::bfs(big, 0);
+        CHECK(ds == dp, "OpenMP BFS matches sequential BFS (all distances)");
+    }
+    // WCC: identical component labels.
+    {
+        auto ls = seq::wcc(big);
+        auto lp = omp::wcc(big);
+        CHECK(ls == lp, "OpenMP WCC matches sequential WCC (all labels)");
+        CHECK(seq::count_components(ls) == seq::count_components(lp),
+              "OpenMP WCC finds the same component count");
+    }
+    // PageRank: equal within a tight tolerance (atomic float order differs).
+    {
+        auto ps = seq::pagerank(big);
+        auto pp = omp::pagerank(big);
+        double maxerr = 0.0;
+        for (VertexId v = 0; v < big.num_vertices; ++v)
+            maxerr = std::max(maxerr, std::abs(ps[v] - pp[v]));
+        CHECK(maxerr < 1e-9, "OpenMP PageRank matches sequential within 1e-9");
+    }
 
     std::cout << "\n" << (failures ? "TESTS FAILED: " : "ALL TESTS PASSED (")
               << failures << (failures ? " failure(s)\n" : " failures)\n");

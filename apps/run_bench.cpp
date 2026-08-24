@@ -17,6 +17,7 @@
 
 #include "../bench/timer.hpp"
 #include "../core/cpu/algorithms.hpp"
+#include "../core/cpu/algorithms_omp.hpp"
 #include "../core/graph/csr.hpp"
 #include "../core/graph/generator.hpp"
 
@@ -85,28 +86,36 @@ int main(int argc, char** argv) {
     double ms = 0.0;
     std::string result_summary;
 
-    if (a.tier != "seq") {
+    const bool seq_tier = (a.tier == "seq");
+    const bool omp_tier = (a.tier == "openmp");
+    if (!seq_tier && !omp_tier) {
         std::cerr << "tier '" << a.tier << "' not implemented yet "
-                     "(added in a later phase). Use --tier seq for now.\n";
+                     "(GPU tiers land in a later phase). Use seq or openmp.\n";
         return 3;
     }
 
     if (a.algo == "bfs") {
         std::vector<std::int32_t> dist;
-        ms = time_median_ms([&]{ dist = seq::bfs(g, a.source); }, a.repeats);
+        ms = time_median_ms([&]{
+            dist = seq_tier ? seq::bfs(g, a.source) : omp::bfs(g, a.source);
+        }, a.repeats);
         std::int64_t reached = 0, maxd = 0;
         for (auto d : dist) if (d != seq::UNREACHED) { reached++; maxd = std::max<std::int64_t>(maxd, d); }
         result_summary = "reached=" + std::to_string(reached) +
                          " max_depth=" + std::to_string(maxd);
     } else if (a.algo == "pagerank") {
         std::vector<double> pr;
-        ms = time_median_ms([&]{ pr = seq::pagerank(g); }, a.repeats);
+        ms = time_median_ms([&]{
+            pr = seq_tier ? seq::pagerank(g) : omp::pagerank(g);
+        }, a.repeats);
         double sum = 0.0, mx = 0.0;
         for (double x : pr) { sum += x; mx = std::max(mx, x); }
         result_summary = "sum=" + std::to_string(sum) + " max_pr=" + std::to_string(mx);
     } else if (a.algo == "wcc") {
         std::vector<VertexId> lbl;
-        ms = time_median_ms([&]{ lbl = seq::wcc(g); }, a.repeats);
+        ms = time_median_ms([&]{
+            lbl = seq_tier ? seq::wcc(g) : omp::wcc(g);
+        }, a.repeats);
         result_summary = "components=" + std::to_string(seq::count_components(lbl));
     } else {
         std::cerr << "unknown algo: " << a.algo << "\n";

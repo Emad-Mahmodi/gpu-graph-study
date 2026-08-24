@@ -9,7 +9,7 @@ OUT=${1:-results/benchmarks.csv}
 mkdir -p "$(dirname "$OUT")"
 
 ALGOS=(bfs pagerank wcc)
-TIERS=(seq)                 # add: openmp cuda ... in later phases
+TIERS=(seq openmp)         # add: cuda ... in later phases
 # RMAT graphs: "scale edge_factor"
 RMATS=("14 16" "16 16" "18 8" "18 16")
 
