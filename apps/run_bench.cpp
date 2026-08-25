@@ -33,6 +33,7 @@ struct Args {
     std::string algo  = "bfs";
     std::string tier  = "seq";
     std::string graph;           // edge-list path (if empty, use rmat)
+    int         grid_side = 0;   // if >0, use a side×side 2D grid instead
     int         rmat_scale = 16;
     int         edge_factor = 16;
     std::uint64_t seed = 1;
@@ -52,6 +53,7 @@ Args parse(int argc, char** argv) {
         if      (k == "--algo")   a.algo = next();
         else if (k == "--tier")   a.tier = next();
         else if (k == "--graph")  a.graph = next();
+        else if (k == "--grid")   a.grid_side = std::stoi(next());
         else if (k == "--rmat")   a.rmat_scale = std::stoi(next());
         else if (k == "--ef")     a.edge_factor = std::stoi(next());
         else if (k == "--seed")   a.seed = std::stoull(next());
@@ -79,6 +81,10 @@ int main(int argc, char** argv) {
     if (!a.graph.empty()) {
         g = CsrGraph::load_edgelist(a.graph, a.symmetrize);
         graph_name = a.graph;
+    } else if (a.grid_side > 0) {
+        g = make_grid(static_cast<std::uint32_t>(a.grid_side));
+        graph_name = "grid-" + std::to_string(a.grid_side) +
+                     "x" + std::to_string(a.grid_side);
     } else {
         g = make_rmat(a.rmat_scale, a.edge_factor, a.seed, a.symmetrize);
         graph_name = "rmat-s" + std::to_string(a.rmat_scale) +
@@ -113,12 +119,9 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    // T3 (cuda_opt) currently implements PageRank only; BFS/WCC optimized
-    // tiers are on the roadmap. Reject rather than silently run the naïve
-    // kernel and mislabel it T3.
-    if (cuda_opt_tier && a.algo != "pagerank") {
-        std::cerr << "--tier cuda_opt (T3) is implemented for pagerank only; "
-                     "use --tier cuda for bfs/wcc.\n";
+    // T3 (cuda_opt) implements bfs, pagerank, and wcc. Louvain has no GPU tier.
+    if (cuda_opt_tier && a.algo == "louvain") {
+        std::cerr << "louvain has no GPU tier; use --tier seq.\n";
         return 3;
     }
 
@@ -128,7 +131,8 @@ int main(int argc, char** argv) {
             if (seq_tier)      dist = seq::bfs(g, a.source);
             else if (omp_tier) dist = omp::bfs(g, a.source);
 #ifdef HAVE_CUDA
-            else               dist = cuda::bfs(g, a.source);
+            else if (cuda_tier)     dist = cuda::bfs(g, a.source);      // T2
+            else                    dist = cuda::bfs_opt(g, a.source);  // T3
 #endif
         }, a.repeats);
         std::int64_t reached = 0, maxd = 0;
@@ -154,7 +158,8 @@ int main(int argc, char** argv) {
             if (seq_tier)      lbl = seq::wcc(g);
             else if (omp_tier) lbl = omp::wcc(g);
 #ifdef HAVE_CUDA
-            else               lbl = cuda::wcc(g);
+            else if (cuda_tier)     lbl = cuda::wcc(g);      // T2
+            else                    lbl = cuda::wcc_opt(g);  // T3
 #endif
         }, a.repeats);
         result_summary = "components=" + std::to_string(seq::count_components(lbl));

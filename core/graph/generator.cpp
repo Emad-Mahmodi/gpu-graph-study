@@ -42,6 +42,21 @@ CsrGraph make_rmat(int scale, int edge_factor, std::uint64_t seed,
     return CsrGraph::from_edges(n, edges, symmetrize);
 }
 
+CsrGraph make_grid(std::uint32_t side) {
+    const VertexId n = static_cast<VertexId>(side) * side;
+    std::vector<std::pair<VertexId, VertexId>> edges;
+    edges.reserve(static_cast<std::size_t>(2) * side * (side - 1));
+    // Emit right and down edges only; symmetrize adds the reverse directions.
+    for (std::uint32_t r = 0; r < side; ++r) {
+        for (std::uint32_t c = 0; c < side; ++c) {
+            VertexId v = static_cast<VertexId>(r) * side + c;
+            if (c + 1 < side) edges.emplace_back(v, v + 1);       // right
+            if (r + 1 < side) edges.emplace_back(v, v + side);    // down
+        }
+    }
+    return CsrGraph::from_edges(n, edges, /*symmetrize=*/true);
+}
+
 CsrGraph make_test_graph() {
     // Component A (0,1,2,3): edges 0-1, 1-2, 2-3, 0-3
     // Component B (4,5,6):   edges 4-5, 5-6, 4-6

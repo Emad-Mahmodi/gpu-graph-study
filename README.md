@@ -13,7 +13,7 @@ This is an **empirical study**, not a claim of a new algorithm. Its value — li
   <a href="#references">References</a>
 </p>
 
-> **Status:** 🚧 Phases 1–4 (PageRank) complete — sequential (T0), OpenMP (T1), naïve CUDA (T2) for BFS / PageRank / WCC, and **optimized CUDA (T3)** for PageRank, plus a sequential Louvain (T0) and a binary→call-graph extractor. All GPU results validated against the T0 oracle (GPU correctness is now a CI test). Real CPU-scaling and GPU results below. **T3 turns PageRank from a 0.43× GPU loss into a 1.62× win** (3.8× faster than the naïve GPU kernel). BFS/WCC T3 are next on the [roadmap](#roadmap).
+> **Status:** 🚧 Phases 1–4 complete — sequential (T0), OpenMP (T1), naïve CUDA (T2) and **optimized CUDA (T3)** for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. All GPU results validated against the T0 oracle (GPU correctness, including a 254-level high-diameter case, is a CI test). Real CPU / GPU results below. Headline findings: **T3 turns PageRank from a 0.43× GPU loss into a 1.62× win**; and for traversal, **the best GPU strategy depends on graph diameter** — the T3 frontier/active-set optimization *loses* on shallow power-law graphs but *wins 2.4×* on high-diameter graphs, where the GPU itself becomes launch-bound. Advanced load balancing (T4) is next on the [roadmap](#roadmap).
 
 ---
 
@@ -38,15 +38,15 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 
 | Algorithm | T0 · Seq C++ | T1 · OpenMP | T2 · Naïve CUDA | T3 · Optimized CUDA | T4 · Advanced |
 |---|:--:|:--:|:--:|:--:|:--:|
-| **BFS** | ✅ | ✅ | ✅ | ⬜ | ⬜ |
+| **BFS** | ✅ | ✅ | ✅ | ✅ | ⬜ |
 | **PageRank** | ✅ | ✅ | ✅ | ✅ | ⬜ |
-| **Connected Components (WCC)** | ✅ | ✅ | ✅ | ⬜ | ⬜ |
+| **Connected Components (WCC)** | ✅ | ✅ | ✅ | ✅ | ⬜ |
 | **Community Detection (Louvain)** | ✅ | ⬜ | ⬜ | ⬜ | — |
 
 **What each tier isolates**
 
 - **T0 Sequential C++** — correctness oracle. Every faster tier is diffed against it (`tests/`).
-- **T1 OpenMP** — multi-core CPU baseline. *GPU speedups are reported against T1, never against a single core* — comparing a GPU to one CPU core is the classic way to inflate a result.
+- **T1 OpenMP** — multi-core CPU baseline. Both the single-core (T0) and full multi-core (T1) CPU times are reported alongside every GPU number, so the reader can judge the GPU against the *best* CPU, not just one core — comparing a GPU only to a single core is the classic way to inflate a result.
 - **T2 Naïve CUDA** — one thread per vertex, CSR, global memory. Honest starting point.
 - **T3 Optimized CUDA** — shared-memory frontiers, memory coalescing, warp primitives (`__shfl`, `__ballot`), kernel fusion.
 - **T4 Advanced** — well-known load-balancing strategies for skewed degree (thread-/warp-/block-per-vertex bucketing, à la Gunrock/Merrill), applied and measured on security graphs. Documented as **established technique**, not a novel contribution.
@@ -147,6 +147,51 @@ named technique* (parallel reduction), not to a rewrite.
 
 Run it yourself: `run_bench --algo pagerank --tier cuda_opt --rmat 20 --ef 16`.
 
+#### Traversal (BFS / WCC): the optimization that depends on graph shape
+
+PageRank has a fixed iteration count and enormous per-iteration parallelism, so
+the reduction fix is an unconditional win. BFS and WCC are different: their T3
+optimizations — an explicit **frontier worklist** for BFS, **active-set** label
+propagation for WCC — only launch the *active* vertices each round instead of
+scanning all N. Whether that pays off depends entirely on how big the frontier
+is, which is set by the graph's **diameter**. So we measured both regimes:
+
+- **RMAT** (2²⁰ vertices, 33.5M edges, BFS depth **4**) — low diameter, huge frontiers.
+- **Grid** (2²⁰ vertices, 4.2M edges, BFS depth **2046**) — high diameter, tiny frontiers.
+
+![Diameter crossover](docs/img/crossover.png)
+
+| Algorithm | Graph | CPU seq | Naïve CUDA (T2) | Optimized (T3) | T3 vs T2 |
+|---|---|--:|--:|--:|:--:|
+| **BFS** | RMAT (depth 4)    | 153.1 ms | **102.3 ms** | 138.6 ms | 0.74× |
+| **BFS** | Grid (depth 2046) | **17.5 ms** | 200.1 ms | 83.9 ms | **2.38×** |
+| **WCC** | RMAT (depth 4)    | 218.7 ms | **88.7 ms** | 96.4 ms | 0.92× |
+| **WCC** | Grid (depth 2046) | **19.5 ms** | 521.5 ms | 397.9 ms | **1.31×** |
+
+Two findings, both honest, both the point of a *study*:
+
+1. **The frontier/active-set optimization only pays off on high-diameter graphs.**
+   On shallow RMAT the frontier is nearly all of N, so the naïve full-scan (T2)
+   already does the right amount of work and the worklist bookkeeping (atomics,
+   per-round `memset`) is pure overhead — T3 *loses* (0.74× / 0.92×). On the
+   grid the frontier is ~√N per level, so skipping the idle vertices makes T3
+   **2.38× faster than T2** for BFS. Same code, opposite verdict — decided by
+   diameter.
+
+2. **On high-diameter graphs the GPU itself is the wrong tool** — the CPU wins
+   outright (17.5 ms vs 83.9 ms for BFS). With 2046 levels of ~1000 vertices
+   each, every kernel launch and per-level host sync is amortized over almost no
+   work: the GPU is **launch/latency-bound**, while the CPU walks the frontier in
+   cache. T3 recovers a lot *within* the GPU tiers, but cannot beat the CPU here.
+   This is the regime where direction-optimizing BFS and CPU/GPU hybrids exist —
+   and knowing *which* regime you are in is the practical takeaway.
+
+Security graphs (call-graphs, network-flow graphs) are power-law and **shallow**
+— the RMAT regime — so the T2 verdict is the one that matters for the domain;
+the grid is the controlled contrast that explains *why*.
+
+Run it yourself: `run_bench --algo bfs --tier cuda_opt --grid 1024`.
+
 ---
 
 ## Quick start
@@ -235,8 +280,8 @@ which is exactly what lets one study span both security domains.
 Every number is regenerated by `scripts/run_benchmarks.sh`; raw CSVs live in `results/`. Following [4]:
 
 - **Hardware:** NVIDIA T600 Laptop GPU (4 GB, Turing, CC 7.5) · Intel Core i7-11850H (8 cores / 16 threads) · 32 GB RAM · Dell Precision 3561.
-- **Software:** CUDA «12.x» · «MSVC / GCC» · `-O3` · driver «version» · Windows 11.
-- **Protocol:** each configuration run **10×**, **median** reported; GPU end-to-end latency will be decomposed into **host→device transfer** vs **on-device kernel** time. GPU speedups are stated against the **OpenMP** baseline (T1) and include transfer time unless labeled kernel-only.
+- **Software:** CUDA 12.8 (`nvcc`, `--generate-code=arch=compute_75,code=sm_75`) · MSVC 19.42 (`/O2`) · CPU tiers `-O3`/` /O2` · Windows 10 (19045).
+- **Protocol:** each configuration run **10×**, **median** reported; GPU timings are end-to-end (include host↔device transfer). Reported speedups are stated against the CPU sequential (T0) and — for the T3 study — against the naïve GPU (T2), so each number isolates one technique.
 - **Correctness:** every non-T0 result is diffed against the T0 oracle in `tests/`; CI fails on any mismatch. RMAT graphs are deterministic given a seed.
 
 ---
@@ -248,7 +293,7 @@ Every number is regenerated by `scripts/run_benchmarks.sh`; raw CSVs live in `re
 - [x] **Phase 1 — Baseline & harness.** ✅ CSR core, RMAT generator, T0 BFS/PageRank/WCC, timing harness, correctness tests, CLI, benchmark sweep, this README.
 - [x] **Phase 2 — Parallel CPU (T1).** ✅ OpenMP BFS/PageRank/WCC, validated against T0; thread-scaling study (chart above); PowerShell benchmark runner.
 - [x] **Phase 3 — GPU (T2).** ✅ Naïve CUDA for BFS/PageRank/WCC, validated against T0 (GPU correctness now a CI test); naïve-vs-CPU study (chart above).
-- [~] **Phase 4 — Optimization (T3).** ✅ PageRank: block-level parallel reductions + precomputed inverse degree (0.43×→1.62× vs CPU, 3.8× vs naïve). ⬜ BFS/WCC: shared-memory frontiers, coalescing, warp primitives next.
+- [x] **Phase 4 — Optimization (T3).** ✅ PageRank: block-level reductions + precomputed inverse degree (0.43×→1.62× vs CPU, 3.8× vs naïve). ✅ BFS (frontier worklist) + WCC (active-set): a diameter-dependent crossover study — T3 loses on shallow graphs, wins 2.4× on high-diameter ones; GPU shown to be launch-bound in the high-diameter regime.
 - [ ] **Phase 5 — Advanced load balancing (T4).** Degree-bucketed scheduling; the GPU-utilization-recovery study on skewed security graphs.
 - [ ] **Phase 6 — Scale & writeup.** Louvain; scale study to 100M+ edges; cross-dataset generalization on IDS data; `docs/` paper draft → arXiv preprint.
 

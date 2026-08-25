@@ -71,6 +71,30 @@ __global__ void bfs_step(const EdgeId* row, const VertexId* col,
     }
 }
 
+// ---------------- BFS T3 (frontier worklist) ----------------------------
+// T2 launches one thread per vertex every level and most threads immediately
+// return (dist[v] != level). T3 keeps an explicit frontier: only the vertices
+// discovered last level are launched. A newly reached vertex is claimed exactly
+// once with atomicCAS (-1 -> level+1) and appended to the next frontier via a
+// single atomicAdd on the output counter. Distances are identical to T0.
+__global__ void bfs_frontier_step(const EdgeId* row, const VertexId* col,
+                                  std::int32_t* dist,
+                                  const VertexId* fin, std::uint32_t in_count,
+                                  VertexId* fout, int* out_count, int level) {
+    std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= in_count) return;
+    VertexId v = fin[i];
+    for (EdgeId e = row[v]; e < row[v + 1]; ++e) {
+        VertexId u = col[e];
+        if (dist[u] != -1) continue;                       // fast path
+        int old = atomicCAS(reinterpret_cast<int*>(&dist[u]), -1, level + 1);
+        if (old == -1) {                                   // we claimed u
+            int slot = atomicAdd(out_count, 1);
+            fout[slot] = u;
+        }
+    }
+}
+
 // ---------------- PageRank ----------------------------------------------
 __global__ void pr_dangling(const EdgeId* row, const double* rank,
                             std::uint32_t n, double* dangling) {
@@ -187,6 +211,30 @@ __global__ void wcc_step(const EdgeId* row, const VertexId* col,
     if (best < label[v]) { label[v] = best; *changed = 1; }
 }
 
+// ---------------- WCC T3 (active-set label propagation) ------------------
+// T2 sweeps all N vertices every round. T3 only reprocesses vertices that are
+// "active" — those whose neighborhood changed last round. When a vertex lowers
+// its label it marks its neighbors active for the next round (a benign race:
+// every write stores the same value, 1). Labels are identical to T0.
+__global__ void wcc_step_active(const EdgeId* row, const VertexId* col,
+                                VertexId* label, const std::uint8_t* ain,
+                                std::uint8_t* aout, std::uint32_t n,
+                                int* changed) {
+    std::uint32_t v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= n || !ain[v]) return;
+    VertexId best = label[v];
+    for (EdgeId e = row[v]; e < row[v + 1]; ++e) {
+        VertexId lu = label[col[e]];
+        if (lu < best) best = lu;
+    }
+    if (best < label[v]) {
+        label[v] = best;
+        *changed = 1;
+        // Our lower label may let neighbors drop too — wake them next round.
+        for (EdgeId e = row[v]; e < row[v + 1]; ++e) aout[col[e]] = 1;
+    }
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------
@@ -221,6 +269,41 @@ std::vector<std::int32_t> bfs(const CsrGraph& g, VertexId source) {
         bfs_step<<<grid_for(n), kBlock>>>(d.row.p, d.col.p, dist.p, level, n, changed.p);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpy(&h_changed, changed.p, sizeof(int), cudaMemcpyDeviceToHost));
+        ++level;
+    }
+    CUDA_CHECK(cudaMemcpy(host.data(), dist.p, n * sizeof(std::int32_t),
+                          cudaMemcpyDeviceToHost));
+    return host;
+}
+
+std::vector<std::int32_t> bfs_opt(const CsrGraph& g, VertexId source) {
+    const std::uint32_t n = g.num_vertices;
+    std::vector<std::int32_t> host(n, -1);
+    if (n == 0) return host;
+    host[source] = 0;
+
+    DeviceCsr d(g);
+    DBuf<std::int32_t> dist(n);
+    CUDA_CHECK(cudaMemcpy(dist.p, host.data(), n * sizeof(std::int32_t),
+                          cudaMemcpyHostToDevice));
+
+    DBuf<VertexId> fa(n), fb(n);
+    DBuf<int> d_count(1);
+    CUDA_CHECK(cudaMemcpy(fa.p, &source, sizeof(VertexId), cudaMemcpyHostToDevice));
+
+    VertexId* fin = fa.p;
+    VertexId* fout = fb.p;
+    std::uint32_t in_count = 1;
+    int level = 0;
+    while (in_count > 0) {
+        CUDA_CHECK(cudaMemset(d_count.p, 0, sizeof(int)));
+        bfs_frontier_step<<<grid_for(in_count), kBlock>>>(
+            d.row.p, d.col.p, dist.p, fin, in_count, fout, d_count.p, level);
+        CUDA_CHECK(cudaGetLastError());
+        int h_count = 0;
+        CUDA_CHECK(cudaMemcpy(&h_count, d_count.p, sizeof(int), cudaMemcpyDeviceToHost));
+        in_count = static_cast<std::uint32_t>(h_count);
+        std::swap(fin, fout);
         ++level;
     }
     CUDA_CHECK(cudaMemcpy(host.data(), dist.p, n * sizeof(std::int32_t),
@@ -316,6 +399,36 @@ std::vector<VertexId> wcc(const CsrGraph& g) {
         wcc_step<<<grid_for(n), kBlock>>>(d.row.p, d.col.p, label.p, n, changed.p);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpy(&h_changed, changed.p, sizeof(int), cudaMemcpyDeviceToHost));
+    }
+    CUDA_CHECK(cudaMemcpy(host.data(), label.p, n * sizeof(VertexId), cudaMemcpyDeviceToHost));
+    return host;
+}
+
+std::vector<VertexId> wcc_opt(const CsrGraph& g) {
+    const std::uint32_t n = g.num_vertices;
+    std::vector<VertexId> host(n);
+    if (n == 0) return host;
+
+    DeviceCsr d(g);
+    DBuf<VertexId> label(n);
+    DBuf<std::uint8_t> aa(n), ab(n);
+    DBuf<int> changed(1);
+
+    wcc_init<<<grid_for(n), kBlock>>>(label.p, n);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemset(aa.p, 1, n));   // round 1: everyone active
+
+    std::uint8_t* ain = aa.p;
+    std::uint8_t* aout = ab.p;
+    int h_changed = 1;
+    while (h_changed) {
+        CUDA_CHECK(cudaMemset(aout, 0, n));
+        CUDA_CHECK(cudaMemset(changed.p, 0, sizeof(int)));
+        wcc_step_active<<<grid_for(n), kBlock>>>(d.row.p, d.col.p, label.p,
+                                                 ain, aout, n, changed.p);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaMemcpy(&h_changed, changed.p, sizeof(int), cudaMemcpyDeviceToHost));
+        std::swap(ain, aout);
     }
     CUDA_CHECK(cudaMemcpy(host.data(), label.p, n * sizeof(VertexId), cudaMemcpyDeviceToHost));
     return host;

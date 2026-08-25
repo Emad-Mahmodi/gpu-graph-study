@@ -18,6 +18,12 @@ CsrGraph make_rmat(int scale, int edge_factor, std::uint64_t seed = 1,
                    bool symmetrize = true,
                    double a = 0.57, double b = 0.19, double c = 0.19);
 
+// A 2D grid (mesh) graph: side*side vertices, 4-connectivity. Unlike RMAT this
+// is a *high-diameter, low-degree* graph (diameter ≈ 2*(side-1)), the opposite
+// regime — used to show where frontier/active-set GPU strategies pay off. One
+// connected component. Undirected (symmetrized).
+CsrGraph make_grid(std::uint32_t side);
+
 // A tiny hand-checkable graph used in unit tests (known BFS/WCC answers).
 // 7 vertices, two connected components:
 //   component A: 0-1-2-3 (a path with an extra 0-3 chord)

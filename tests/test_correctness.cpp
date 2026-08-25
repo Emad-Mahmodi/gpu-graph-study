@@ -102,6 +102,21 @@ int main() {
     }
 
     // ====================================================================
+    // High-diameter grid. RMAT is only ~4 BFS levels; a grid is ~2*(side-1),
+    // so this is where a many-level frontier/active-set bug would surface.
+    // ====================================================================
+    {
+        CsrGraph grid = make_grid(64);   // 4096 vertices, diameter 126
+        CHECK(grid.num_vertices == 4096, "grid 64 has 4096 vertices");
+        auto d = seq::bfs(grid, 0);
+        CHECK(d[4095] == 126, "grid BFS corner-to-corner distance == 2*(side-1)");
+        auto l = seq::wcc(grid);
+        CHECK(seq::count_components(l) == 1, "grid is one connected component");
+        auto dp = omp::bfs(grid, 0);
+        CHECK(d == dp, "OpenMP BFS matches seq on high-diameter grid");
+    }
+
+    // ====================================================================
     // Louvain (T0). The test graph has two obvious communities: the 4-cycle
     // {0,1,2,3} and the triangle {4,5,6}, joined by nothing. Louvain must find
     // exactly those two, with positive modularity.
@@ -137,18 +152,24 @@ int main() {
     if (cuda::available()) {
         std::cout << "\n[CUDA] device: " << cuda::device_name() << "\n";
 
-        // BFS T2 == T0 (exact).
+        // BFS T2 and T3 == T0 (exact distances).
         {
-            auto ds = seq::bfs(big, 0);
-            auto dc = cuda::bfs(big, 0);
-            CHECK(ds == dc, "CUDA T2 BFS matches sequential BFS (all distances)");
+            auto ds  = seq::bfs(big, 0);
+            auto dc2 = cuda::bfs(big, 0);       // T2 naïve
+            auto dc3 = cuda::bfs_opt(big, 0);   // T3 frontier
+            CHECK(ds == dc2, "CUDA T2 BFS matches sequential BFS (all distances)");
+            CHECK(ds == dc3, "CUDA T3 BFS matches sequential BFS (all distances)");
         }
-        // WCC T2 == T0 (exact).
+        // WCC T2 and T3 == T0 (same component labels).
         {
-            auto ls = seq::wcc(big);
-            auto lc = cuda::wcc(big);
-            CHECK(seq::count_components(ls) == seq::count_components(lc),
+            auto ls  = seq::wcc(big);
+            auto lc2 = cuda::wcc(big);       // T2 naïve
+            auto lc3 = cuda::wcc_opt(big);   // T3 active-set
+            CHECK(seq::count_components(ls) == seq::count_components(lc2),
                   "CUDA T2 WCC finds the same component count");
+            CHECK(lc2 == lc3, "CUDA T3 WCC matches T2 WCC (all labels)");
+            CHECK(seq::count_components(ls) == seq::count_components(lc3),
+                  "CUDA T3 WCC finds the same component count");
         }
         // PageRank T2 and T3 == T0 (within tolerance; atomic order differs).
         {
@@ -162,6 +183,20 @@ int main() {
             }
             CHECK(e2 < 1e-9, "CUDA T2 PageRank matches sequential within 1e-9");
             CHECK(e3 < 1e-9, "CUDA T3 PageRank matches sequential within 1e-9");
+        }
+        // High-diameter grid: the real test of the many-level frontier /
+        // active-set kernels (254 levels here vs ~4 on RMAT).
+        {
+            CsrGraph grid = make_grid(128);   // 16384 vertices, diameter 254
+            auto ds = seq::bfs(grid, 0);
+            auto d2 = cuda::bfs(grid, 0);
+            auto d3 = cuda::bfs_opt(grid, 0);
+            CHECK(ds == d2, "CUDA T2 BFS matches seq on high-diameter grid");
+            CHECK(ds == d3, "CUDA T3 BFS matches seq on high-diameter grid");
+            auto ls = seq::wcc(grid);
+            auto l3 = cuda::wcc_opt(grid);
+            CHECK(seq::count_components(ls) == seq::count_components(l3),
+                  "CUDA T3 WCC matches seq component count on grid");
         }
     } else {
         std::cout << "\n[CUDA] no device visible — GPU tiers not tested here.\n";

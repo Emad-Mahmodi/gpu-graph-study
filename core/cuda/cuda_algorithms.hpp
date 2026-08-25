@@ -21,6 +21,12 @@ std::string device_name();
 
 std::vector<std::int32_t> bfs(const CsrGraph& g, VertexId source);
 
+// Tier T3 — optimized CUDA BFS: an explicit frontier worklist. Instead of
+// scanning all N vertices at every level (T2), only the current frontier is
+// launched; newly discovered vertices are claimed with atomicCAS and appended
+// to the next frontier. Same distances as the T0 oracle.
+std::vector<std::int32_t> bfs_opt(const CsrGraph& g, VertexId source);
+
 std::vector<double> pagerank(const CsrGraph& g,
                              double damping   = 0.85,
                              int    max_iters = 100,
@@ -38,5 +44,11 @@ std::vector<double> pagerank_opt(const CsrGraph& g,
                                  double tol       = 1e-9);
 
 std::vector<VertexId> wcc(const CsrGraph& g);
+
+// Tier T3 — optimized CUDA WCC: active-set label propagation. Only vertices
+// whose neighborhood changed in the previous round are reprocessed, instead of
+// sweeping all N vertices every round (T2). Same component labels as the T0
+// oracle.
+std::vector<VertexId> wcc_opt(const CsrGraph& g);
 
 }  // namespace ggs::cuda
