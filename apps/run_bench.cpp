@@ -21,6 +21,9 @@
 #include "../core/cpu/louvain.hpp"
 #include "../core/graph/csr.hpp"
 #include "../core/graph/generator.hpp"
+#ifdef HAVE_CUDA
+#include "../core/cuda/cuda_algorithms.hpp"
+#endif
 
 using namespace ggs;
 
@@ -89,16 +92,44 @@ int main(int argc, char** argv) {
 
     const bool seq_tier = (a.tier == "seq");
     const bool omp_tier = (a.tier == "openmp");
-    if (!seq_tier && !omp_tier) {
-        std::cerr << "tier '" << a.tier << "' not implemented yet "
-                     "(GPU tiers land in a later phase). Use seq or openmp.\n";
+    const bool cuda_tier = (a.tier == "cuda");           // T2 naïve
+    const bool cuda_opt_tier = (a.tier == "cuda_opt");   // T3 optimized
+    const bool any_cuda = cuda_tier || cuda_opt_tier;
+    if (!seq_tier && !omp_tier && !any_cuda) {
+        std::cerr << "unknown tier '" << a.tier
+                  << "'. Use seq, openmp, cuda, or cuda_opt.\n";
+        return 3;
+    }
+#ifndef HAVE_CUDA
+    if (any_cuda) {
+        std::cerr << "this binary was built without CUDA; rebuild on a machine "
+                     "with the CUDA toolkit to use --tier cuda / cuda_opt.\n";
+        return 3;
+    }
+#else
+    if (any_cuda && !cuda::available()) {
+        std::cerr << "no CUDA device visible at runtime.\n";
+        return 3;
+    }
+#endif
+
+    // T3 (cuda_opt) currently implements PageRank only; BFS/WCC optimized
+    // tiers are on the roadmap. Reject rather than silently run the naïve
+    // kernel and mislabel it T3.
+    if (cuda_opt_tier && a.algo != "pagerank") {
+        std::cerr << "--tier cuda_opt (T3) is implemented for pagerank only; "
+                     "use --tier cuda for bfs/wcc.\n";
         return 3;
     }
 
     if (a.algo == "bfs") {
         std::vector<std::int32_t> dist;
         ms = time_median_ms([&]{
-            dist = seq_tier ? seq::bfs(g, a.source) : omp::bfs(g, a.source);
+            if (seq_tier)      dist = seq::bfs(g, a.source);
+            else if (omp_tier) dist = omp::bfs(g, a.source);
+#ifdef HAVE_CUDA
+            else               dist = cuda::bfs(g, a.source);
+#endif
         }, a.repeats);
         std::int64_t reached = 0, maxd = 0;
         for (auto d : dist) if (d != seq::UNREACHED) { reached++; maxd = std::max<std::int64_t>(maxd, d); }
@@ -107,7 +138,12 @@ int main(int argc, char** argv) {
     } else if (a.algo == "pagerank") {
         std::vector<double> pr;
         ms = time_median_ms([&]{
-            pr = seq_tier ? seq::pagerank(g) : omp::pagerank(g);
+            if (seq_tier)      pr = seq::pagerank(g);
+            else if (omp_tier) pr = omp::pagerank(g);
+#ifdef HAVE_CUDA
+            else if (cuda_tier)     pr = cuda::pagerank(g);      // T2 naïve
+            else                    pr = cuda::pagerank_opt(g);  // T3 optimized
+#endif
         }, a.repeats);
         double sum = 0.0, mx = 0.0;
         for (double x : pr) { sum += x; mx = std::max(mx, x); }
@@ -115,12 +151,16 @@ int main(int argc, char** argv) {
     } else if (a.algo == "wcc") {
         std::vector<VertexId> lbl;
         ms = time_median_ms([&]{
-            lbl = seq_tier ? seq::wcc(g) : omp::wcc(g);
+            if (seq_tier)      lbl = seq::wcc(g);
+            else if (omp_tier) lbl = omp::wcc(g);
+#ifdef HAVE_CUDA
+            else               lbl = cuda::wcc(g);
+#endif
         }, a.repeats);
         result_summary = "components=" + std::to_string(seq::count_components(lbl));
     } else if (a.algo == "louvain") {
-        if (omp_tier) {
-            std::cerr << "louvain has no OpenMP tier yet; use --tier seq.\n";
+        if (!seq_tier) {
+            std::cerr << "louvain currently has a sequential (T0) tier only; use --tier seq.\n";
             return 3;
         }
         seq::LouvainResult lr;

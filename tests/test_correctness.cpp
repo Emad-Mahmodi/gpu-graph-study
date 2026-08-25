@@ -12,6 +12,9 @@
 #include "../core/cpu/louvain.hpp"
 #include "../core/graph/csr.hpp"
 #include "../core/graph/generator.hpp"
+#ifdef HAVE_CUDA
+#include "../core/cuda/cuda_algorithms.hpp"
+#endif
 
 using namespace ggs;
 
@@ -125,6 +128,45 @@ int main() {
         CHECK(lr.num_communities >= 1 && lr.num_communities <= big.num_vertices,
               "Louvain community count is sane on RMAT graph");
     }
+
+#ifdef HAVE_CUDA
+    // ====================================================================
+    // Tiers T2 (naïve CUDA) and T3 (optimized CUDA) must match the T0 oracle
+    // on a larger, skewed graph. Skipped gracefully if no GPU is visible.
+    // ====================================================================
+    if (cuda::available()) {
+        std::cout << "\n[CUDA] device: " << cuda::device_name() << "\n";
+
+        // BFS T2 == T0 (exact).
+        {
+            auto ds = seq::bfs(big, 0);
+            auto dc = cuda::bfs(big, 0);
+            CHECK(ds == dc, "CUDA T2 BFS matches sequential BFS (all distances)");
+        }
+        // WCC T2 == T0 (exact).
+        {
+            auto ls = seq::wcc(big);
+            auto lc = cuda::wcc(big);
+            CHECK(seq::count_components(ls) == seq::count_components(lc),
+                  "CUDA T2 WCC finds the same component count");
+        }
+        // PageRank T2 and T3 == T0 (within tolerance; atomic order differs).
+        {
+            auto ps  = seq::pagerank(big);
+            auto p2  = cuda::pagerank(big);       // T2 naïve
+            auto p3  = cuda::pagerank_opt(big);   // T3 optimized
+            double e2 = 0.0, e3 = 0.0;
+            for (VertexId v = 0; v < big.num_vertices; ++v) {
+                e2 = std::max(e2, std::abs(ps[v] - p2[v]));
+                e3 = std::max(e3, std::abs(ps[v] - p3[v]));
+            }
+            CHECK(e2 < 1e-9, "CUDA T2 PageRank matches sequential within 1e-9");
+            CHECK(e3 < 1e-9, "CUDA T3 PageRank matches sequential within 1e-9");
+        }
+    } else {
+        std::cout << "\n[CUDA] no device visible — GPU tiers not tested here.\n";
+    }
+#endif
 
     std::cout << "\n" << (failures ? "TESTS FAILED: " : "ALL TESTS PASSED (")
               << failures << (failures ? " failure(s)\n" : " failures)\n");

@@ -13,7 +13,7 @@ This is an **empirical study**, not a claim of a new algorithm. Its value — li
   <a href="#references">References</a>
 </p>
 
-> **Status:** 🚧 Phases 1–2 complete — sequential (T0) and OpenMP (T1) tiers for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. All validated against the T0 oracle. First real thread-scaling results below. GPU tiers (T2+) are next on the [roadmap](#roadmap).
+> **Status:** 🚧 Phases 1–3 complete — sequential (T0), OpenMP (T1), and **naïve CUDA (T2)** tiers for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. All GPU results validated against the T0 oracle. Real CPU-scaling and GPU results below. T3 (optimized CUDA) is next on the [roadmap](#roadmap).
 
 ---
 
@@ -38,9 +38,9 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 
 | Algorithm | T0 · Seq C++ | T1 · OpenMP | T2 · Naïve CUDA | T3 · Optimized CUDA | T4 · Advanced |
 |---|:--:|:--:|:--:|:--:|:--:|
-| **BFS** | ✅ | ✅ | ⬜ | ⬜ | ⬜ |
-| **PageRank** | ✅ | ✅ | ⬜ | ⬜ | ⬜ |
-| **Connected Components (WCC)** | ✅ | ✅ | ⬜ | ⬜ | ⬜ |
+| **BFS** | ✅ | ✅ | ✅ | ⬜ | ⬜ |
+| **PageRank** | ✅ | ✅ | ✅ | 🚧 | ⬜ |
+| **Connected Components (WCC)** | ✅ | ✅ | ✅ | ⬜ | ⬜ |
 | **Community Detection (Louvain)** | ✅ | ⬜ | ⬜ | ⬜ | — |
 
 **What each tier isolates**
@@ -88,20 +88,35 @@ What the numbers say — and *why* is the point of the study:
 
 *Regenerate: `powershell -ExecutionPolicy Bypass -File .\scripts\scaling.ps1` → `results/scaling.csv`.*
 
-**Once GPU tiers land, the headline tables become:**
+### Phase 3 — Naïve CUDA (T2) vs CPU
 
-Speedup vs. the OpenMP multi-core baseline (T1), geometric mean over all datasets:
+Naïve GPU tier (one thread per vertex, CSR in global memory, no shared memory or
+warp primitives yet) on a large power-law graph (2²⁰ vertices, 33.5M edges).
+Hardware: NVIDIA T600 (sm_75) vs. Intel Core i7-11850H. All GPU outputs match the
+sequential oracle exactly (BFS, WCC) / within tolerance (PageRank).
 
-| Algorithm | T2 Naïve | T3 Optimized | T4 Advanced |
-|---|:--:|:--:|:--:|
-| BFS | [ ]× | [ ]× | [ ]× |
+![Naïve CUDA vs CPU](docs/img/cuda_t2.png)
 
-GPU utilization on the most skewed graph (the plot that makes this a study, not a tutorial):
+| Algorithm | CPU seq | Naïve CUDA (T2) | Speedup |
+|---|--:|--:|:--:|
+| **WCC** | 200.9 ms | 90.5 ms | **2.22×** |
+| **BFS** | 139.0 ms | 96.5 ms | **1.44×** |
+| **PageRank** | 1834 ms | 4296 ms | **0.43×** |
 
-| Tier | SM occupancy | Warp exec. efficiency |
-|---|:--:|:--:|
-| T2 Naïve | [ ]% | [ ]% |
-| T4 Advanced | [ ]% | [ ]% |
+The honest finding — and the reason this is a *study*:
+
+- **WCC and BFS already win** at the naïve tier on a large graph: enough work per
+  kernel to hide launch and transfer overhead. (On the smaller 2¹⁸ graph BFS was
+  *slower* — the GPU only pays off once the graph is big enough, itself a result
+  worth showing.)
+- **Naïve PageRank loses (0.43×)** — not because of the algorithm, but because its
+  two per-iteration reductions (dangling mass, L1 change) are single-address
+  `atomicAdd`s hammered by all N threads. That contention serializes the GPU. This
+  is the textbook naïve-reduction bottleneck, and it is exactly what the **T3**
+  tier fixes (block-level parallel reductions + shared memory).
+
+*This is the point of the tiered design: the tier that fails tells you which
+optimization matters next.*
 
 ---
 
