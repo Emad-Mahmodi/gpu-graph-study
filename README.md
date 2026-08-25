@@ -13,7 +13,7 @@ This is an **empirical study**, not a claim of a new algorithm. Its value — li
   <a href="#references">References</a>
 </p>
 
-> **Status:** 🚧 Phases 1–4 complete — sequential (T0), OpenMP (T1), naïve CUDA (T2) and **optimized CUDA (T3)** for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. All GPU results validated against the T0 oracle (GPU correctness, including a 254-level high-diameter case, is a CI test). Real CPU / GPU results below. Headline findings: **T3 turns PageRank from a 0.43× GPU loss into a 1.62× win**; and for traversal, **the best GPU strategy depends on graph diameter** — the T3 frontier/active-set optimization *loses* on shallow power-law graphs but *wins 2.4×* on high-diameter graphs, where the GPU itself becomes launch-bound. Advanced load balancing (T4) is next on the [roadmap](#roadmap).
+> **Status:** 🚧 Phases 1–4 complete — sequential (T0), OpenMP (T1), naïve CUDA (T2) and **optimized CUDA (T3)** for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. Every GPU result is validated against the T0 oracle (GPU correctness, including a 254-level high-diameter case, is a CI test), and every GPU number is reported against **both** a single CPU core and the full 8-core OpenMP tier. Headline findings, all honest: **(1)** the T3 optimizations are large and real *as techniques* — PageRank T3 is **3.8× faster than naïve GPU**, BFS-on-grid **2.4×**; **(2)** the best traversal strategy **depends on graph diameter** (the frontier/active-set optimization loses on shallow graphs, wins on high-diameter ones); **(3)** on *this* hardware — an entry-level 4 GB T600 vs a strong 8-core i7 — the **multi-core CPU wins on these mid-size graphs**, a candid result about entry GPUs, not a marketing number. Advanced load balancing (T4) and a 100M+-edge scale study are next on the [roadmap](#roadmap).
 
 ---
 
@@ -97,28 +97,34 @@ sequential oracle exactly (BFS, WCC) / within tolerance (PageRank).
 
 ![Naïve CUDA vs CPU](docs/img/cuda_t2.png)
 
-| Algorithm | CPU seq | Naïve CUDA (T2) | Speedup |
-|---|--:|--:|:--:|
-| **WCC** | 200.9 ms | 90.5 ms | **2.22×** |
-| **BFS** | 139.0 ms | 96.5 ms | **1.44×** |
-| **PageRank** | 1834 ms | 4296 ms | **0.43×** |
+Reported against **both** CPU baselines — a single core (T0) and the full 8-core
+OpenMP tier (T1) — so the GPU is judged against the *best* CPU, not just one core:
 
-The honest finding — and the reason this is a *study*:
+| Algorithm | CPU 1-core (T0) | CPU 8-core (T1) | Naïve CUDA (T2) | T2 vs T0 | T2 vs T1 |
+|---|--:|--:|--:|:--:|:--:|
+| **WCC** | 218.7 ms | 46.2 ms | 88.7 ms | 2.47× | 0.52× |
+| **BFS** | 153.1 ms | 75.2 ms | 102.3 ms | 1.50× | 0.74× |
+| **PageRank** | 1866.9 ms | 744.7 ms | 4386.6 ms | 0.43× | 0.17× |
 
-- **WCC and BFS already win** at the naïve tier on a large graph: enough work per
-  kernel to hide launch and transfer overhead. (On the smaller 2¹⁸ graph BFS was
-  *slower* — the GPU only pays off once the graph is big enough, itself a result
-  worth showing.)
-- **Naïve PageRank loses (0.43×)** — not because of the algorithm, but because its
-  two per-iteration reductions (dangling mass, L1 change) are single-address
-  `atomicAdd`s hammered by all N threads. That contention serializes the GPU. This
-  is the textbook naïve-reduction bottleneck, and it is exactly what the **T3**
-  tier fixes (block-level parallel reductions + shared memory).
+The honest finding — and the reason this is a *study*, not a benchmark ad:
+
+- **The naïve GPU beats a single CPU core** for WCC (2.5×) and BFS (1.5×), **but
+  loses to the 8-core CPU** on every algorithm. Comparing a GPU only to one core
+  is the classic way to inflate a result; against the real multi-core baseline
+  this entry-level T600 does not win at the naïve tier.
+- **Naïve PageRank loses to everything (0.43× vs 1 core)** — not because of the
+  algorithm, but because its two per-iteration reductions (dangling mass, L1
+  change) are single-address `atomicAdd`s hammered by all N threads. That
+  contention serializes the GPU. This is the textbook naïve-reduction bottleneck,
+  and it is exactly what the **T3** tier fixes.
 
 *This is the point of the tiered design: the tier that fails tells you which
-optimization matters next.*
+optimization matters next — and an honest baseline tells you whether the GPU was
+ever the right tool.*
 
-### Phase 4 — Optimized CUDA (T3): fixing PageRank
+### Phase 4 — Optimized CUDA (T3)
+
+#### PageRank: fixing the atomic-contention bottleneck
 
 T2 named the culprit; T3 removes it. Two changes, both textbook, both targeting
 the atomic-contention bottleneck the naïve tier exposed — and nothing else about
@@ -133,17 +139,23 @@ the numerical result changes (it is diffed against the T0 oracle in CI):
 
 ![Optimized CUDA (T3) PageRank](docs/img/cuda_t3.png)
 
-| PageRank (2²⁰ vertices, 33.5M edges) | Median time | vs CPU | vs naïve GPU |
+| PageRank (2²⁰ vertices, 33.5M edges) | Median time | vs 1 core (T0) | vs naïve GPU (T2) |
 |---|--:|:--:|:--:|
-| CPU sequential (T0) | 1866.9 ms | 1.00× | — |
+| CPU 1-core (T0) | 1866.9 ms | 1.00× | — |
+| CPU 8-core (T1) | **744.7 ms** | 2.51× | — |
 | Naïve CUDA (T2) | 4386.6 ms | 0.43× | 1.00× |
 | **Optimized CUDA (T3)** | **1153.6 ms** | **1.62×** | **3.80×** |
 
-The optimized kernel is **3.8× faster than the naïve GPU version** and **1.62×
-faster than the CPU** — a full turnaround from the naïve tier's loss, achieved
-by attacking exactly the bottleneck the T2 measurement identified. This is the
-study's core claim in miniature: *the speedup is attributable to a specific,
-named technique* (parallel reduction), not to a rewrite.
+The optimized kernel is **3.8× faster than the naïve GPU version** — a full
+turnaround from the naïve tier's loss, achieved by attacking exactly the
+bottleneck the T2 measurement identified. That is the study's core claim in
+miniature: *the speedup is attributable to a specific, named technique* (parallel
+reduction), not to a rewrite. It also passes single-core CPU (1.62×). **The
+8-core CPU is still faster (744.7 ms)** — honest, and expected: the T600 is an
+entry-level 4 GB GPU and PageRank here is memory-bandwidth-bound, a fight a
+strong 8-core CPU with 24 MB of L3 wins at this graph size. The T3 *technique* is
+the transferable result; whether the T600 *hardware* wins is a separate question
+the roadmap's scale study (100M+ edges) is designed to answer.
 
 Run it yourself: `run_bench --algo pagerank --tier cuda_opt --rmat 20 --ef 16`.
 
@@ -161,12 +173,12 @@ is, which is set by the graph's **diameter**. So we measured both regimes:
 
 ![Diameter crossover](docs/img/crossover.png)
 
-| Algorithm | Graph | CPU seq | Naïve CUDA (T2) | Optimized (T3) | T3 vs T2 |
-|---|---|--:|--:|--:|:--:|
-| **BFS** | RMAT (depth 4)    | 153.1 ms | **102.3 ms** | 138.6 ms | 0.74× |
-| **BFS** | Grid (depth 2046) | **17.5 ms** | 200.1 ms | 83.9 ms | **2.38×** |
-| **WCC** | RMAT (depth 4)    | 218.7 ms | **88.7 ms** | 96.4 ms | 0.92× |
-| **WCC** | Grid (depth 2046) | **19.5 ms** | 521.5 ms | 397.9 ms | **1.31×** |
+| Algorithm | Graph | CPU 1-core | CPU 8-core | Naïve CUDA (T2) | Optimized (T3) | T3 vs T2 |
+|---|---|--:|--:|--:|--:|:--:|
+| **BFS** | RMAT (depth 4)    | 153.1 ms | **75.2 ms** | 102.3 ms | 138.6 ms | 0.74× |
+| **BFS** | Grid (depth 2046) | **17.5 ms** | 36.9 ms | 200.1 ms | 83.9 ms | **2.38×** |
+| **WCC** | RMAT (depth 4)    | 218.7 ms | **46.2 ms** | 88.7 ms | 96.4 ms | 0.92× |
+| **WCC** | Grid (depth 2046) | 19.5 ms | **9.3 ms** | 521.5 ms | 397.9 ms | **1.31×** |
 
 Two findings, both honest, both the point of a *study*:
 
@@ -179,16 +191,23 @@ Two findings, both honest, both the point of a *study*:
    diameter.
 
 2. **On high-diameter graphs the GPU itself is the wrong tool** — the CPU wins
-   outright (17.5 ms vs 83.9 ms for BFS). With 2046 levels of ~1000 vertices
-   each, every kernel launch and per-level host sync is amortized over almost no
-   work: the GPU is **launch/latency-bound**, while the CPU walks the frontier in
-   cache. T3 recovers a lot *within* the GPU tiers, but cannot beat the CPU here.
-   This is the regime where direction-optimizing BFS and CPU/GPU hybrids exist —
-   and knowing *which* regime you are in is the practical takeaway.
+   outright (BFS: 17.5 ms single-core vs 83.9 ms for the best GPU tier). With
+   2046 levels of ~1000 vertices each, every kernel launch and per-level host
+   sync is amortized over almost no work: the GPU is **launch/latency-bound**,
+   while the CPU walks the frontier in cache. T3 recovers a lot *within* the GPU
+   tiers, but cannot close the gap. A neat side-detail: for grid BFS even
+   *OpenMP is slower than one core* (36.9 vs 17.5 ms) — so little parallel work
+   per level that thread overhead dominates there too. This is the regime where
+   direction-optimizing BFS and CPU/GPU hybrids exist — and knowing *which*
+   regime you are in is the practical takeaway.
 
 Security graphs (call-graphs, network-flow graphs) are power-law and **shallow**
-— the RMAT regime — so the T2 verdict is the one that matters for the domain;
-the grid is the controlled contrast that explains *why*.
+— the RMAT regime — so the practical verdict for the domain is: on mid-size
+graphs a strong multi-core CPU is the sensible default, the naïve GPU tier does
+*not* justify the frontier optimization, and the GPU becomes attractive only at
+larger scale (the roadmap's scale study) or with the T4 load-balancing tier. The
+grid is the controlled contrast that explains *why* the diameter, not the raw
+size, decides which strategy wins.
 
 Run it yourself: `run_bench --algo bfs --tier cuda_opt --grid 1024`.
 
