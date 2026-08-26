@@ -204,7 +204,8 @@ __global__ void pr_update_opt(const EdgeId* row, const VertexId* col,
 //     neighbor list (coalesced col[] reads) and combine via __shfl_down_sync.
 // Both kernels write into next[] and accumulate the L1 change with the same
 // block-level reduction as T3.
-constexpr EdgeId kDegThresh = 32;   // warp width — the natural low/high split
+constexpr EdgeId kDegThresh  = 32;    // low/mid split — one warp's worth
+constexpr EdgeId kBlockThresh = 1024;  // mid/high split — extreme hubs get a block
 
 // Low-degree bucket: thread per vertex, indexed through the id list.
 __global__ void pr_bucket_thread(const EdgeId* row, const VertexId* col,
@@ -251,6 +252,36 @@ __global__ void pr_bucket_warp(const EdgeId* row, const VertexId* col,
         }
     }
     block_reduce_add(local, diff);         // only lane 0 of each warp is nonzero
+}
+
+// High-degree bucket, level 3: one whole block per extreme hub. All blockDim
+// threads stride the neighbor list; a shared-memory tree reduction combines the
+// partial sums, then thread 0 writes next[v] and the L1 change. Launched with
+// exactly `count` blocks, so blockIdx.x is always a valid hub index.
+__global__ void pr_bucket_block(const EdgeId* row, const VertexId* col,
+                                const double* rank, const double* inv_deg,
+                                double* next, double damping, const double* add,
+                                const VertexId* ids, std::uint32_t count,
+                                double* diff) {
+    __shared__ double s[kBlock];
+    std::uint32_t bi = blockIdx.x;
+    if (bi >= count) return;                    // safety; normally bi < count
+    VertexId v = ids[bi];
+    int t = threadIdx.x;
+    double sum = 0.0;
+    for (EdgeId e = row[v] + t; e < row[v + 1]; e += blockDim.x)
+        sum += rank[col[e]] * inv_deg[col[e]];
+    s[t] = sum;
+    __syncthreads();
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (t < stride) s[t] += s[t + stride];
+        __syncthreads();
+    }
+    if (t == 0) {
+        double nv = *add + damping * s[0];
+        next[v] = nv;
+        atomicAdd(diff, fabs(nv - rank[v]));    // one atomic per hub — negligible
+    }
 }
 
 // ---------------- WCC (label propagation) -------------------------------
@@ -448,24 +479,33 @@ std::vector<double> pagerank_lb(const CsrGraph& g, double damping,
     std::vector<double> host(n, n ? 1.0 / n : 0.0);
     if (n == 0) return host;
 
-    // Partition vertex ids into low/high-degree buckets once (degrees are fixed
-    // across iterations). This is the load-balancing decision, done on the host.
-    std::vector<VertexId> low, high;
+    // Partition vertex ids into three degree buckets once (degrees are fixed
+    // across iterations). This is the load-balancing decision, done on the host:
+    //   low  (≤32)        -> thread per vertex
+    //   mid  (33..1024)   -> warp per vertex
+    //   high (>1024)      -> block per vertex
+    std::vector<VertexId> low, mid, high;
     low.reserve(n);
     for (VertexId v = 0; v < n; ++v) {
         EdgeId deg = g.row_offsets[v + 1] - g.row_offsets[v];
-        (deg > kDegThresh ? high : low).push_back(v);
+        if (deg > kBlockThresh)     high.push_back(v);
+        else if (deg > kDegThresh)  mid.push_back(v);
+        else                        low.push_back(v);
     }
     const std::uint32_t low_n  = static_cast<std::uint32_t>(low.size());
+    const std::uint32_t mid_n  = static_cast<std::uint32_t>(mid.size());
     const std::uint32_t high_n = static_cast<std::uint32_t>(high.size());
 
     DeviceCsr d(g);
     DBuf<double> rank(n), next(n), inv_deg(n), d_add(1), d_dangling(1), d_diff(1);
     CUDA_CHECK(cudaMemcpy(rank.p, host.data(), n * sizeof(double),
                           cudaMemcpyHostToDevice));
-    DBuf<VertexId> d_low(low_n ? low_n : 1), d_high(high_n ? high_n : 1);
+    DBuf<VertexId> d_low(low_n ? low_n : 1), d_mid(mid_n ? mid_n : 1),
+                   d_high(high_n ? high_n : 1);
     if (low_n)  CUDA_CHECK(cudaMemcpy(d_low.p, low.data(),
                                       low_n * sizeof(VertexId), cudaMemcpyHostToDevice));
+    if (mid_n)  CUDA_CHECK(cudaMemcpy(d_mid.p, mid.data(),
+                                      mid_n * sizeof(VertexId), cudaMemcpyHostToDevice));
     if (high_n) CUDA_CHECK(cudaMemcpy(d_high.p, high.data(),
                                       high_n * sizeof(VertexId), cudaMemcpyHostToDevice));
 
@@ -474,8 +514,8 @@ std::vector<double> pagerank_lb(const CsrGraph& g, double damping,
     CUDA_CHECK(cudaGetLastError());
 
     const int warps_per_block = kBlock / 32;   // 8
-    const int low_grid  = static_cast<int>((low_n + kBlock - 1) / kBlock);
-    const int high_grid = static_cast<int>((high_n + warps_per_block - 1) / warps_per_block);
+    const int low_grid = static_cast<int>((low_n + kBlock - 1) / kBlock);
+    const int mid_grid = static_cast<int>((mid_n + warps_per_block - 1) / warps_per_block);
 
     for (int it = 0; it < max_iters; ++it) {
         CUDA_CHECK(cudaMemset(d_dangling.p, 0, sizeof(double)));
@@ -486,8 +526,11 @@ std::vector<double> pagerank_lb(const CsrGraph& g, double damping,
         if (low_n)
             pr_bucket_thread<<<low_grid, kBlock>>>(d.row.p, d.col.p, rank.p,
                 inv_deg.p, next.p, damping, d_add.p, d_low.p, low_n, d_diff.p);
+        if (mid_n)
+            pr_bucket_warp<<<mid_grid, kBlock>>>(d.row.p, d.col.p, rank.p,
+                inv_deg.p, next.p, damping, d_add.p, d_mid.p, mid_n, d_diff.p);
         if (high_n)
-            pr_bucket_warp<<<high_grid, kBlock>>>(d.row.p, d.col.p, rank.p,
+            pr_bucket_block<<<high_n, kBlock>>>(d.row.p, d.col.p, rank.p,
                 inv_deg.p, next.p, damping, d_add.p, d_high.p, high_n, d_diff.p);
         CUDA_CHECK(cudaGetLastError());
 
