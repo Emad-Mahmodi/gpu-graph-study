@@ -43,6 +43,17 @@ std::vector<double> pagerank_opt(const CsrGraph& g,
                                  int    max_iters = 100,
                                  double tol       = 1e-9);
 
+// Tier T4 — degree-bucketed load balancing (established Gunrock/Merrill
+// technique, not a novel contribution). Vertices are split once by out-degree:
+// low-degree vertices keep one thread each, high-degree hubs get a whole warp
+// (32 lanes stride the neighbor list, coalesced, then a warp-shuffle reduction).
+// This attacks the power-law load imbalance that a single thread on a 10^5-degree
+// hub causes. Same result as the T0 oracle.
+std::vector<double> pagerank_lb(const CsrGraph& g,
+                                double damping   = 0.85,
+                                int    max_iters = 100,
+                                double tol       = 1e-9);
+
 std::vector<VertexId> wcc(const CsrGraph& g);
 
 // Tier T3 — optimized CUDA WCC: active-set label propagation. Only vertices

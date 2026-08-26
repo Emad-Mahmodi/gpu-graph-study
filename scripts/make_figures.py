@@ -16,7 +16,8 @@ import numpy as np
 RMAT = {
     "BFS":      {"T0": 153.109, "T1": 75.1992, "T2": 102.278, "T3": 138.559},
     "WCC":      {"T0": 218.655, "T1": 46.2037, "T2": 88.6794, "T3": 96.3744},
-    "PageRank": {"T0": 1866.93, "T1": 744.683, "T2": 4386.55, "T3": 1153.61},
+    # PageRank from one consistent run (adds the T4 degree-bucketed tier).
+    "PageRank": {"T0": 1863.78, "T1": 662.22, "T2": 3917.48, "T3": 978.406, "T4": 758.671},
 }
 # Grid 1024: 2^20 vertices, 4.2M edges, BFS depth 2046  (high diameter)
 GRID = {
@@ -24,9 +25,11 @@ GRID = {
     "WCC": {"T0": 19.5131, "T1": 9.3099,  "T2": 521.535, "T3": 397.896},
 }
 
-COL = {"T0": "#8a8a8a", "T1": "#4c72b0", "T2": "#d9822b", "T3": "#2e8b57"}
+COL = {"T0": "#8a8a8a", "T1": "#4c72b0", "T2": "#d9822b",
+       "T3": "#2e8b57", "T4": "#7b3fa0"}
 NAME = {"T0": "CPU 1-core (T0)", "T1": "CPU 8-core (T1)",
-        "T2": "Naïve CUDA (T2)", "T3": "Optimized CUDA (T3)"}
+        "T2": "Naïve CUDA (T2)", "T3": "Optimized CUDA (T3)",
+        "T4": "Load-balanced (T4)"}
 
 
 def dump_csv():
@@ -76,11 +79,33 @@ def fig_t3():
                 ha="center", va="bottom", fontsize=10, fontweight="bold")
     ax.set_ylabel("Median wall-clock (ms, lower = better)")
     ax.set_title("Phase 4 — Optimized CUDA (T3) PageRank\n"
-                 "3.8× faster than naïve GPU · 1.62× vs 1 core · still behind the 8-core CPU")
+                 "4.0× faster than naïve GPU · 1.9× vs 1 core · still behind the 8-core CPU")
     ax.set_ylim(0, max(times)*1.16); ax.grid(axis="y", alpha=0.3)
     plt.setp(ax.get_xticklabels(), fontsize=9)
     fig.tight_layout(); fig.savefig("docs/img/cuda_t3.png", dpi=130, bbox_inches="tight")
     print("wrote docs/img/cuda_t3.png")
+
+
+# ---- Figure 2b: PageRank full ladder T0..T4 (T4 = load balancing) -----------
+def fig_t4():
+    tiers = ["T0", "T1", "T2", "T3", "T4"]
+    times = [RMAT["PageRank"][t] for t in tiers]
+    fig, ax = plt.subplots(figsize=(9.2, 4.6))
+    bars = ax.bar([NAME[t] for t in tiers], times, color=[COL[t] for t in tiers],
+                  edgecolor="black", lw=0.6, width=0.64)
+    for b, t in zip(bars, times):
+        ax.text(b.get_x()+b.get_width()/2, t+70, f"{t:.0f} ms",
+                ha="center", va="bottom", fontsize=10, fontweight="bold")
+    # highlight the closing gap between T4 and the 8-core CPU
+    t1, t4 = RMAT["PageRank"]["T1"], RMAT["PageRank"]["T4"]
+    ax.axhline(t1, color="#4c72b0", ls="--", lw=1.1, alpha=0.7)
+    ax.set_ylabel("Median wall-clock (ms, lower = better)")
+    ax.set_title("Phase 5 — Degree-bucketed load balancing (T4) PageRank\n"
+                 "5.2× faster than naïve GPU · 2.46× vs 1 core · within 15% of the 8-core CPU")
+    ax.set_ylim(0, max(times)*1.16); ax.grid(axis="y", alpha=0.3)
+    plt.setp(ax.get_xticklabels(), fontsize=8.5)
+    fig.tight_layout(); fig.savefig("docs/img/cuda_t4.png", dpi=130, bbox_inches="tight")
+    print("wrote docs/img/cuda_t4.png")
 
 
 # ---- Figure 3: diameter crossover ------------------------------------------
@@ -121,7 +146,7 @@ def fig_crossover():
 
 
 if __name__ == "__main__":
-    dump_csv(); fig_t2(); fig_t3(); fig_crossover()
+    dump_csv(); fig_t2(); fig_t3(); fig_t4(); fig_crossover()
     # handy ratios
     for a in ("BFS", "WCC", "PageRank"):
         r = RMAT[a]

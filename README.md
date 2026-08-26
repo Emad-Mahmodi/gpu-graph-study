@@ -13,7 +13,7 @@ This is an **empirical study**, not a claim of a new algorithm. Its value — li
   <a href="#references">References</a>
 </p>
 
-> **Status:** 🚧 Phases 1–4 complete — sequential (T0), OpenMP (T1), naïve CUDA (T2) and **optimized CUDA (T3)** for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. Every GPU result is validated against the T0 oracle (GPU correctness, including a 254-level high-diameter case, is a CI test), and every GPU number is reported against **both** a single CPU core and the full 8-core OpenMP tier. Headline findings, all honest: **(1)** the T3 optimizations are large and real *as techniques* — PageRank T3 is **3.8× faster than naïve GPU**, BFS-on-grid **2.4×**; **(2)** the best traversal strategy **depends on graph diameter** (the frontier/active-set optimization loses on shallow graphs, wins on high-diameter ones); **(3)** on *this* hardware — an entry-level 4 GB T600 vs a strong 8-core i7 — the **multi-core CPU wins on these mid-size graphs**, a candid result about entry GPUs, not a marketing number. Advanced load balancing (T4) and a 100M+-edge scale study are next on the [roadmap](#roadmap).
+> **Status:** 🚧 Phases 1–5 complete — sequential (T0), OpenMP (T1), naïve CUDA (T2), optimized CUDA (T3) for BFS / PageRank / WCC, and **degree-bucketed load balancing (T4)** for PageRank, plus a sequential Louvain (T0) and a binary→call-graph extractor. Every GPU result is validated against the T0 oracle (GPU correctness, including a 254-level high-diameter case, is a CI test), and every GPU number is reported against **both** a single CPU core and the full 8-core OpenMP tier. Headline findings, all honest: **(1)** the GPU optimizations are large and real *as techniques* — PageRank goes from a **0.48× naïve loss to 5.16× faster than naïve GPU** across T3 (parallel reduction) + T4 (degree-bucketing), each speedup attributable to one named technique; **(2)** the best traversal strategy **depends on graph diameter** (the frontier/active-set optimization loses on shallow graphs, wins 2.4× on high-diameter ones); **(3)** on *this* hardware — an entry-level 4 GB T600 vs a strong 8-core i7 — the **multi-core CPU still edges the GPU on these mid-size graphs** (T4 closes to within 15%), a candid result about entry GPUs, not a marketing number. A 100M+-edge scale study is next on the [roadmap](#roadmap).
 
 ---
 
@@ -39,7 +39,7 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 | Algorithm | T0 · Seq C++ | T1 · OpenMP | T2 · Naïve CUDA | T3 · Optimized CUDA | T4 · Advanced |
 |---|:--:|:--:|:--:|:--:|:--:|
 | **BFS** | ✅ | ✅ | ✅ | ✅ | ⬜ |
-| **PageRank** | ✅ | ✅ | ✅ | ✅ | ⬜ |
+| **PageRank** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Connected Components (WCC)** | ✅ | ✅ | ✅ | ✅ | ⬜ |
 | **Community Detection (Louvain)** | ✅ | ⬜ | ⬜ | ⬜ | — |
 
@@ -141,23 +141,56 @@ the numerical result changes (it is diffed against the T0 oracle in CI):
 
 | PageRank (2²⁰ vertices, 33.5M edges) | Median time | vs 1 core (T0) | vs naïve GPU (T2) |
 |---|--:|:--:|:--:|
-| CPU 1-core (T0) | 1866.9 ms | 1.00× | — |
-| CPU 8-core (T1) | **744.7 ms** | 2.51× | — |
-| Naïve CUDA (T2) | 4386.6 ms | 0.43× | 1.00× |
-| **Optimized CUDA (T3)** | **1153.6 ms** | **1.62×** | **3.80×** |
+| CPU 1-core (T0) | 1863.8 ms | 1.00× | — |
+| CPU 8-core (T1) | **662.2 ms** | 2.81× | — |
+| Naïve CUDA (T2) | 3917.5 ms | 0.48× | 1.00× |
+| **Optimized CUDA (T3)** | **978.4 ms** | **1.90×** | **4.00×** |
 
-The optimized kernel is **3.8× faster than the naïve GPU version** — a full
+The optimized kernel is **4.0× faster than the naïve GPU version** — a full
 turnaround from the naïve tier's loss, achieved by attacking exactly the
 bottleneck the T2 measurement identified. That is the study's core claim in
 miniature: *the speedup is attributable to a specific, named technique* (parallel
-reduction), not to a rewrite. It also passes single-core CPU (1.62×). **The
-8-core CPU is still faster (744.7 ms)** — honest, and expected: the T600 is an
-entry-level 4 GB GPU and PageRank here is memory-bandwidth-bound, a fight a
-strong 8-core CPU with 24 MB of L3 wins at this graph size. The T3 *technique* is
-the transferable result; whether the T600 *hardware* wins is a separate question
-the roadmap's scale study (100M+ edges) is designed to answer.
+reduction), not to a rewrite. It also passes single-core CPU (1.90×). The 8-core
+CPU is still faster (662 ms), but the T3 gather is *still* one thread per vertex
+— which the next tier fixes.
 
 Run it yourself: `run_bench --algo pagerank --tier cuda_opt --rmat 20 --ef 16`.
+
+#### PageRank T4 — degree-bucketed load balancing (Phase 5)
+
+T3 fixed the reduction; the **gather** is still one thread per vertex. On a
+power-law graph (this one's max degree is **138,626** vs an average of 32) that
+means one thread walks a 138k-neighbor hub's list while its 31 warp-mates idle —
+textbook load imbalance and uncoalesced access. T4 applies the established
+**Gunrock/Merrill degree-bucketing** strategy (documented as standard technique,
+not a novel contribution): vertices are split once by out-degree and each bucket
+gets the right granularity —
+
+- **low-degree (≤ 32): one thread per vertex** — no wasted lanes;
+- **high-degree (> 32): one warp per vertex** — 32 lanes stride the neighbor
+  list with **coalesced** `col[]` reads and combine via `__shfl_down_sync`.
+
+![Load-balanced (T4) PageRank](docs/img/cuda_t4.png)
+
+| PageRank (2²⁰ vertices, 33.5M edges) | Median time | vs 1 core | vs naïve GPU (T2) | vs T3 |
+|---|--:|:--:|:--:|:--:|
+| CPU 1-core (T0) | 1863.8 ms | 1.00× | — | — |
+| CPU 8-core (T1) | **662.2 ms** | 2.81× | — | — |
+| Naïve CUDA (T2) | 3917.5 ms | 0.48× | 1.00× | — |
+| Optimized CUDA (T3) | 978.4 ms | 1.90× | 4.00× | 1.00× |
+| **Load-balanced (T4)** | **758.7 ms** | **2.46×** | **5.16×** | **1.29×** |
+
+Degree-bucketing takes PageRank from the naïve tier's **0.48× loss** to **5.16×
+faster than naïve GPU** and **2.46× faster than a CPU core** — and closes most of
+the remaining gap to the 8-core CPU (759 ms vs 662 ms, ~15%). The two GPU
+optimizations compound cleanly and each is attributable to one named technique:
+**T3 = parallel reduction** (fixes the write/reduce), **T4 = degree-bucketed
+scheduling** (fixes the read/gather). A further split — a *block* per extreme hub
+— is the natural T4.1 and is left as documented future work. On this entry-level
+4 GB T600 the strong 8-core CPU still edges it at this scale; the roadmap's
+100M+-edge study is where the GPU's bandwidth is expected to pull ahead.
+
+Run it yourself: `run_bench --algo pagerank --tier cuda_lb --rmat 20 --ef 16`.
 
 #### Traversal (BFS / WCC): the optimization that depends on graph shape
 
@@ -313,7 +346,7 @@ Every number is regenerated by `scripts/run_benchmarks.sh`; raw CSVs live in `re
 - [x] **Phase 2 — Parallel CPU (T1).** ✅ OpenMP BFS/PageRank/WCC, validated against T0; thread-scaling study (chart above); PowerShell benchmark runner.
 - [x] **Phase 3 — GPU (T2).** ✅ Naïve CUDA for BFS/PageRank/WCC, validated against T0 (GPU correctness now a CI test); naïve-vs-CPU study (chart above).
 - [x] **Phase 4 — Optimization (T3).** ✅ PageRank: block-level reductions + precomputed inverse degree (0.43×→1.62× vs CPU, 3.8× vs naïve). ✅ BFS (frontier worklist) + WCC (active-set): a diameter-dependent crossover study — T3 loses on shallow graphs, wins 2.4× on high-diameter ones; GPU shown to be launch-bound in the high-diameter regime.
-- [ ] **Phase 5 — Advanced load balancing (T4).** Degree-bucketed scheduling; the GPU-utilization-recovery study on skewed security graphs.
+- [~] **Phase 5 — Advanced load balancing (T4).** ✅ PageRank: two-bucket degree scheduling (thread-per-vertex + warp-per-vertex), 5.16× over naïve GPU, closes to within 15% of the 8-core CPU. ⬜ Three-level (block-per-hub) split and BFS/WCC load balancing next.
 - [ ] **Phase 6 — Scale & writeup.** Louvain; scale study to 100M+ edges; cross-dataset generalization on IDS data; `docs/` paper draft → arXiv preprint.
 
 Detailed weekly milestones in [`docs/ROADMAP.md`](docs/ROADMAP.md).

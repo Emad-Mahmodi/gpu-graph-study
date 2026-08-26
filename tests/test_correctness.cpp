@@ -176,13 +176,16 @@ int main() {
             auto ps  = seq::pagerank(big);
             auto p2  = cuda::pagerank(big);       // T2 naïve
             auto p3  = cuda::pagerank_opt(big);   // T3 optimized
-            double e2 = 0.0, e3 = 0.0;
+            auto p4  = cuda::pagerank_lb(big);    // T4 degree-bucketed
+            double e2 = 0.0, e3 = 0.0, e4 = 0.0;
             for (VertexId v = 0; v < big.num_vertices; ++v) {
                 e2 = std::max(e2, std::abs(ps[v] - p2[v]));
                 e3 = std::max(e3, std::abs(ps[v] - p3[v]));
+                e4 = std::max(e4, std::abs(ps[v] - p4[v]));
             }
             CHECK(e2 < 1e-9, "CUDA T2 PageRank matches sequential within 1e-9");
             CHECK(e3 < 1e-9, "CUDA T3 PageRank matches sequential within 1e-9");
+            CHECK(e4 < 1e-9, "CUDA T4 PageRank matches sequential within 1e-9");
         }
         // High-diameter grid: the real test of the many-level frontier /
         // active-set kernels (254 levels here vs ~4 on RMAT).

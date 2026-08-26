@@ -100,16 +100,17 @@ int main(int argc, char** argv) {
     const bool omp_tier = (a.tier == "openmp");
     const bool cuda_tier = (a.tier == "cuda");           // T2 naïve
     const bool cuda_opt_tier = (a.tier == "cuda_opt");   // T3 optimized
-    const bool any_cuda = cuda_tier || cuda_opt_tier;
+    const bool cuda_lb_tier = (a.tier == "cuda_lb");     // T4 load-balanced
+    const bool any_cuda = cuda_tier || cuda_opt_tier || cuda_lb_tier;
     if (!seq_tier && !omp_tier && !any_cuda) {
         std::cerr << "unknown tier '" << a.tier
-                  << "'. Use seq, openmp, cuda, or cuda_opt.\n";
+                  << "'. Use seq, openmp, cuda, cuda_opt, or cuda_lb.\n";
         return 3;
     }
 #ifndef HAVE_CUDA
     if (any_cuda) {
         std::cerr << "this binary was built without CUDA; rebuild on a machine "
-                     "with the CUDA toolkit to use --tier cuda / cuda_opt.\n";
+                     "with the CUDA toolkit to use --tier cuda / cuda_opt / cuda_lb.\n";
         return 3;
     }
 #else
@@ -122,6 +123,12 @@ int main(int argc, char** argv) {
     // T3 (cuda_opt) implements bfs, pagerank, and wcc. Louvain has no GPU tier.
     if (cuda_opt_tier && a.algo == "louvain") {
         std::cerr << "louvain has no GPU tier; use --tier seq.\n";
+        return 3;
+    }
+    // T4 (cuda_lb) is demonstrated on PageRank (the degree-skewed gather).
+    if (cuda_lb_tier && a.algo != "pagerank") {
+        std::cerr << "--tier cuda_lb (T4 degree-bucketing) is implemented for "
+                     "pagerank; use --tier cuda_opt for bfs/wcc.\n";
         return 3;
     }
 
@@ -146,7 +153,8 @@ int main(int argc, char** argv) {
             else if (omp_tier) pr = omp::pagerank(g);
 #ifdef HAVE_CUDA
             else if (cuda_tier)     pr = cuda::pagerank(g);      // T2 naïve
-            else                    pr = cuda::pagerank_opt(g);  // T3 optimized
+            else if (cuda_opt_tier) pr = cuda::pagerank_opt(g);  // T3 optimized
+            else                    pr = cuda::pagerank_lb(g);   // T4 load-balanced
 #endif
         }, a.repeats);
         double sum = 0.0, mx = 0.0;
