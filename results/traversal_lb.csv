@@ -1,0 +1,21 @@
+﻿algo,graph,tier,median_ms,summary
+bfs,rmat-s20-ef16,T0,149.656,reached=645489 max_depth=4
+bfs,rmat-s20-ef16,T1,72.3919,reached=645489 max_depth=4
+bfs,rmat-s20-ef16,T2,104.123,reached=645489 max_depth=4
+bfs,rmat-s20-ef16,T3,137.839,reached=645489 max_depth=4
+bfs,rmat-s20-ef16,T4,52.6312,reached=645489 max_depth=4
+bfs,grid-1024,T0,17.2728,reached=1048576 max_depth=2046
+bfs,grid-1024,T1,35.9836,reached=1048576 max_depth=2046
+bfs,grid-1024,T2,204.317,reached=1048576 max_depth=2046
+bfs,grid-1024,T3,82.793,reached=1048576 max_depth=2046
+bfs,grid-1024,T4,154.068,reached=1048576 max_depth=2046
+wcc,rmat-s20-ef16,T0,207.665,components=402904
+wcc,rmat-s20-ef16,T1,44.4608,components=402904
+wcc,rmat-s20-ef16,T2,88.9715,components=402904
+wcc,rmat-s20-ef16,T3,96.1578,components=402904
+wcc,rmat-s20-ef16,T4,76.2729,components=402904
+wcc,grid-1024,T0,20.106,components=1
+wcc,grid-1024,T1,7.2644,components=1
+wcc,grid-1024,T2,529.494,components=1
+wcc,grid-1024,T3,409.207,components=1
+wcc,grid-1024,T4,490.635,components=1

@@ -6,18 +6,21 @@ Measured on NVIDIA T600 (sm_75) vs Intel i7-11850H, median of 10 runs.
   RMAT s20 : 2^20 vertices, 33.5M edges, BFS depth 4      (low diameter)
   Grid 1024: 2^20 vertices,  4.2M edges, BFS depth 2046   (high diameter)
 """
+import csv
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-# median_ms measured on the T600.
-data = {
-    "BFS": {"rmat": {"t2": 102.278, "t3": 138.559},
-            "grid": {"t2": 200.092, "t3": 83.9267}},
-    "WCC": {"rmat": {"t2": 88.6794, "t3": 96.3744},
-            "grid": {"t2": 521.535, "t3": 397.896}},
-}
+# Read the committed measurements so the figure can never drift from the CSV.
+_raw = {}
+with open("results/benchmarks.csv", encoding="utf-8-sig", newline="") as fh:
+    for row in csv.DictReader(fh):
+        kind = "rmat" if row["graph"].startswith("rmat") else "grid"
+        _raw.setdefault(row["algo"].upper(), {}).setdefault(kind, {})[row["tier"]] =             float(row["median_ms"])
+
+data = {a: {k: {"t2": v["T2"], "t3": v["T3"]} for k, v in _raw[a].items()}
+        for a in ("BFS", "WCC")}
 
 fig, (axL, axR) = plt.subplots(1, 2, figsize=(12, 4.8))
 
@@ -49,9 +52,10 @@ axL.grid(axis="y", alpha=0.3)
 
 # --- Right: absolute times incl. CPU, to show the launch-bound regime --------
 labels = ["BFS\nRMAT", "BFS\nGrid", "WCC\nRMAT", "WCC\nGrid"]
-cpu = [153.109, 17.483, 218.655, 19.5131]
-t2  = [102.278, 200.092, 88.6794, 521.535]
-t3  = [138.559, 83.9267, 96.3744, 397.896]
+_cases = [("BFS", "rmat"), ("BFS", "grid"), ("WCC", "rmat"), ("WCC", "grid")]
+cpu = [_raw[a][k]["T0"] for a, k in _cases]
+t2  = [_raw[a][k]["T2"] for a, k in _cases]
+t3  = [_raw[a][k]["T3"] for a, k in _cases]
 x = np.arange(len(labels)); w = 0.26
 axR.bar(x - w, cpu, w, label="CPU (seq)",       color="#4c72b0", edgecolor="black", linewidth=0.5)
 axR.bar(x,     t2,  w, label="Naïve CUDA (T2)",  color="#d9822b", edgecolor="black", linewidth=0.5)

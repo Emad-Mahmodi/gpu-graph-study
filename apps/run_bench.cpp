@@ -120,15 +120,10 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    // T3 (cuda_opt) implements bfs, pagerank, and wcc. Louvain has no GPU tier.
-    if (cuda_opt_tier && a.algo == "louvain") {
+    // The GPU tiers T2/T3/T4 all implement bfs, pagerank and wcc.
+    // Louvain is sequential-only (see the roadmap).
+    if (any_cuda && a.algo == "louvain") {
         std::cerr << "louvain has no GPU tier; use --tier seq.\n";
-        return 3;
-    }
-    // T4 (cuda_lb) is demonstrated on PageRank (the degree-skewed gather).
-    if (cuda_lb_tier && a.algo != "pagerank") {
-        std::cerr << "--tier cuda_lb (T4 degree-bucketing) is implemented for "
-                     "pagerank; use --tier cuda_opt for bfs/wcc.\n";
         return 3;
     }
 
@@ -139,7 +134,8 @@ int main(int argc, char** argv) {
             else if (omp_tier) dist = omp::bfs(g, a.source);
 #ifdef HAVE_CUDA
             else if (cuda_tier)     dist = cuda::bfs(g, a.source);      // T2
-            else                    dist = cuda::bfs_opt(g, a.source);  // T3
+            else if (cuda_opt_tier) dist = cuda::bfs_opt(g, a.source);  // T3
+            else                    dist = cuda::bfs_lb(g, a.source);   // T4
 #endif
         }, a.repeats);
         std::int64_t reached = 0, maxd = 0;
@@ -167,7 +163,8 @@ int main(int argc, char** argv) {
             else if (omp_tier) lbl = omp::wcc(g);
 #ifdef HAVE_CUDA
             else if (cuda_tier)     lbl = cuda::wcc(g);      // T2
-            else                    lbl = cuda::wcc_opt(g);  // T3
+            else if (cuda_opt_tier) lbl = cuda::wcc_opt(g);  // T3
+            else                    lbl = cuda::wcc_lb(g);   // T4
 #endif
         }, a.repeats);
         result_summary = "components=" + std::to_string(seq::count_components(lbl));

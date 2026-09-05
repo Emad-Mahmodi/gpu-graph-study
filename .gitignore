@@ -9,6 +9,12 @@ data/graphs/*.map
 !data/graphs/ls.map
 results/*.csv
 !results/.gitkeep
+# The measurement CSVs the README quotes and the figure scripts read are
+# committed on purpose: without them a fresh clone cannot regenerate the
+# charts, and the reported numbers would be unverifiable.
+!results/benchmarks.csv
+!results/scaling.csv
+!results/traversal_lb.csv
 .DS_Store
 *.nsys-rep
 *.ncu-rep

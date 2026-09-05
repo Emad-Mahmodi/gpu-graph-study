@@ -20,6 +20,14 @@ namespace {
 
 constexpr int kBlock = 256;
 
+// Degree thresholds for the T4 load-balancing tier, shared by PageRank, BFS and
+// WCC so the three studies bucket identically:
+//   deg <= kDegThresh              -> one thread per vertex
+//   kDegThresh < deg <= kBlockThresh -> one warp  per vertex
+//   deg >  kBlockThresh            -> one block per vertex
+constexpr EdgeId kDegThresh   = 32;    // low/mid split — one warp's worth
+constexpr EdgeId kBlockThresh = 1024;  // mid/high split — extreme hubs get a block
+
 inline void check(cudaError_t e, const char* what) {
     if (e != cudaSuccess) {
         std::fprintf(stderr, "CUDA error (%s): %s\n", what, cudaGetErrorString(e));
@@ -93,6 +101,83 @@ __global__ void bfs_frontier_step(const EdgeId* row, const VertexId* col,
             fout[slot] = u;
         }
     }
+}
+
+// ---------------- BFS T4 (per-level degree-bucketed frontier) -----------
+// T3 removed the wasted *launches* (only the frontier runs) but left the load
+// imbalance inside a launch: one thread still walks a hub's whole neighbour
+// list while its 31 warp-mates, holding degree-1 leaves, idle. T4 applies the
+// same Gunrock/Merrill bucketing as PageRank — but PageRank can bucket once on
+// the host because every vertex is active every iteration, whereas the BFS
+// frontier changes shape at every level. So the split is redone on the device
+// each level (`bfs_bucket_split`), which is the roadmap's "re-bucket between
+// levels". The three expand kernels below share one claim helper, so the
+// visited/append semantics are literally identical to T3 — only the mapping of
+// threads to edges differs. Distances therefore match the T0 oracle exactly.
+
+// Claim one neighbour: identical to the body of the T3 frontier kernel.
+__device__ inline void bfs_claim(const VertexId* col, EdgeId e,
+                                 std::int32_t* dist, int level,
+                                 VertexId* fout, int* out_count) {
+    VertexId u = col[e];
+    if (dist[u] != -1) return;                          // fast path
+    int old = atomicCAS(reinterpret_cast<int*>(&dist[u]), -1, level + 1);
+    if (old == -1) fout[atomicAdd(out_count, 1)] = u;   // we claimed u
+}
+
+// Partition this level's frontier into three sub-frontiers by out-degree.
+__global__ void bfs_bucket_split(const EdgeId* row, const VertexId* fin,
+                                 std::uint32_t in_count,
+                                 VertexId* b_low, VertexId* b_mid, VertexId* b_high,
+                                 int* c_low, int* c_mid, int* c_high) {
+    std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= in_count) return;
+    VertexId v = fin[i];
+    EdgeId deg = row[v + 1] - row[v];
+    if (deg > kBlockThresh)    b_high[atomicAdd(c_high, 1)] = v;
+    else if (deg > kDegThresh) b_mid[atomicAdd(c_mid, 1)]  = v;
+    else                       b_low[atomicAdd(c_low, 1)]  = v;
+}
+
+// Low-degree sub-frontier: one thread per vertex (the T3 mapping).
+__global__ void bfs_expand_thread(const EdgeId* row, const VertexId* col,
+                                  std::int32_t* dist, const VertexId* ids,
+                                  std::uint32_t count, VertexId* fout,
+                                  int* out_count, int level) {
+    std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    VertexId v = ids[i];
+    for (EdgeId e = row[v]; e < row[v + 1]; ++e)
+        bfs_claim(col, e, dist, level, fout, out_count);
+}
+
+// Mid-degree sub-frontier: one warp per vertex. The 32 lanes stride the
+// neighbour list, so consecutive lanes read consecutive col[] entries —
+// coalesced, unlike the one-thread-walks-the-list access of T3.
+__global__ void bfs_expand_warp(const EdgeId* row, const VertexId* col,
+                                std::int32_t* dist, const VertexId* ids,
+                                std::uint32_t count, VertexId* fout,
+                                int* out_count, int level) {
+    std::uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x & 31;
+    std::uint32_t w = tid >> 5;              // warp-uniform: one warp per vertex
+    if (w >= count) return;
+    VertexId v = ids[w];
+    for (EdgeId e = row[v] + lane; e < row[v + 1]; e += 32)
+        bfs_claim(col, e, dist, level, fout, out_count);
+}
+
+// High-degree sub-frontier: one whole block per extreme hub, launched with
+// exactly `count` blocks. No reduction is needed here (unlike PageRank) — each
+// thread claims its own neighbours independently.
+__global__ void bfs_expand_block(const EdgeId* row, const VertexId* col,
+                                 std::int32_t* dist, const VertexId* ids,
+                                 std::uint32_t count, VertexId* fout,
+                                 int* out_count, int level) {
+    if (blockIdx.x >= count) return;
+    VertexId v = ids[blockIdx.x];
+    for (EdgeId e = row[v] + threadIdx.x; e < row[v + 1]; e += blockDim.x)
+        bfs_claim(col, e, dist, level, fout, out_count);
 }
 
 // ---------------- PageRank ----------------------------------------------
@@ -204,9 +289,6 @@ __global__ void pr_update_opt(const EdgeId* row, const VertexId* col,
 //     neighbor list (coalesced col[] reads) and combine via __shfl_down_sync.
 // Both kernels write into next[] and accumulate the L1 change with the same
 // block-level reduction as T3.
-constexpr EdgeId kDegThresh  = 32;    // low/mid split — one warp's worth
-constexpr EdgeId kBlockThresh = 1024;  // mid/high split — extreme hubs get a block
-
 // Low-degree bucket: thread per vertex, indexed through the id list.
 __global__ void pr_bucket_thread(const EdgeId* row, const VertexId* col,
                                  const double* rank, const double* inv_deg,
@@ -326,6 +408,103 @@ __global__ void wcc_step_active(const EdgeId* row, const VertexId* col,
     }
 }
 
+// ---------------- WCC T4 (degree-bucketed active-set) -------------------
+// T3 fixed *which* vertices are rescanned (only the woken ones). It did not fix
+// *how* a vertex is scanned: a thread owning a 10^5-degree hub still walks the
+// whole list alone. T4 keeps the T3 active-set and adds the same three-level
+// Gunrock bucketing used by PageRank. WCC's degrees are static, so the buckets
+// are built once on the host (unlike BFS, whose frontier changes every level).
+//
+// Each bucket kernel does the same thing as `wcc_step_active`: take the minimum
+// label over the neighbourhood, and if it lowers our own label, write it and
+// wake the neighbours. Only the reduction differs — a warp shuffle for the mid
+// bucket, a shared-memory tree for the high bucket. Label propagation converges
+// to the same fixpoint (the minimum id per component) regardless of the order
+// updates are applied in, so labels match T0 exactly.
+
+// Low-degree bucket: one thread per vertex — the T3 mapping, over an id list.
+__global__ void wcc_bucket_thread(const EdgeId* row, const VertexId* col,
+                                  VertexId* label, const std::uint8_t* ain,
+                                  std::uint8_t* aout, const VertexId* ids,
+                                  std::uint32_t count, int* changed) {
+    std::uint32_t i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    VertexId v = ids[i];
+    if (!ain[v]) return;
+    VertexId my = label[v], best = my;
+    for (EdgeId e = row[v]; e < row[v + 1]; ++e) {
+        VertexId lu = label[col[e]];
+        if (lu < best) best = lu;
+    }
+    if (best < my) {
+        label[v] = best;
+        *changed = 1;
+        for (EdgeId e = row[v]; e < row[v + 1]; ++e) aout[col[e]] = 1;
+    }
+}
+
+// Mid-degree bucket: one warp per vertex. Lanes stride the neighbour list
+// (coalesced label[col[e]] gathers), then min-reduce via __shfl_down_sync and
+// broadcast the winner back to every lane so the whole warp can do the
+// neighbour wake-up pass, also coalesced.
+__global__ void wcc_bucket_warp(const EdgeId* row, const VertexId* col,
+                                VertexId* label, const std::uint8_t* ain,
+                                std::uint8_t* aout, const VertexId* ids,
+                                std::uint32_t count, int* changed) {
+    std::uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int lane = threadIdx.x & 31;
+    std::uint32_t w = tid >> 5;              // warp-uniform
+    if (w >= count) return;
+    VertexId v = ids[w];
+    if (!ain[v]) return;                     // warp-uniform: v is warp-uniform
+    // Read our own label *before* any lane writes it, so the comparison below
+    // cannot race with lane 0's store.
+    VertexId my = label[v], best = my;
+    for (EdgeId e = row[v] + lane; e < row[v + 1]; e += 32) {
+        VertexId lu = label[col[e]];
+        if (lu < best) best = lu;
+    }
+    for (int off = 16; off > 0; off >>= 1) {
+        VertexId o = __shfl_down_sync(0xffffffffu, best, off);
+        if (o < best) best = o;
+    }
+    best = __shfl_sync(0xffffffffu, best, 0);   // broadcast the warp minimum
+    if (best < my) {
+        if (lane == 0) { label[v] = best; *changed = 1; }
+        for (EdgeId e = row[v] + lane; e < row[v + 1]; e += 32) aout[col[e]] = 1;
+    }
+}
+
+// High-degree bucket: one block per extreme hub, launched with exactly `count`
+// blocks. Shared-memory tree min-reduction, then the whole block cooperates on
+// the wake-up pass.
+__global__ void wcc_bucket_block(const EdgeId* row, const VertexId* col,
+                                 VertexId* label, const std::uint8_t* ain,
+                                 std::uint8_t* aout, const VertexId* ids,
+                                 std::uint32_t count, int* changed) {
+    __shared__ VertexId s[kBlock];
+    if (blockIdx.x >= count) return;
+    VertexId v = ids[blockIdx.x];
+    if (!ain[v]) return;                     // block-uniform
+    int t = threadIdx.x;
+    VertexId my = label[v], best = my;
+    for (EdgeId e = row[v] + t; e < row[v + 1]; e += blockDim.x) {
+        VertexId lu = label[col[e]];
+        if (lu < best) best = lu;
+    }
+    s[t] = best;
+    __syncthreads();
+    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
+        if (t < stride && s[t + stride] < s[t]) s[t] = s[t + stride];
+        __syncthreads();
+    }
+    VertexId res = s[0];                     // valid in every thread after sync
+    if (res < my) {
+        if (t == 0) { label[v] = res; *changed = 1; }
+        for (EdgeId e = row[v] + t; e < row[v + 1]; e += blockDim.x) aout[col[e]] = 1;
+    }
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------
@@ -394,6 +573,72 @@ std::vector<std::int32_t> bfs_opt(const CsrGraph& g, VertexId source) {
         int h_count = 0;
         CUDA_CHECK(cudaMemcpy(&h_count, d_count.p, sizeof(int), cudaMemcpyDeviceToHost));
         in_count = static_cast<std::uint32_t>(h_count);
+        std::swap(fin, fout);
+        ++level;
+    }
+    CUDA_CHECK(cudaMemcpy(host.data(), dist.p, n * sizeof(std::int32_t),
+                          cudaMemcpyDeviceToHost));
+    return host;
+}
+
+std::vector<std::int32_t> bfs_lb(const CsrGraph& g, VertexId source) {
+    const std::uint32_t n = g.num_vertices;
+    std::vector<std::int32_t> host(n, -1);
+    if (n == 0) return host;
+    host[source] = 0;
+
+    DeviceCsr d(g);
+    DBuf<std::int32_t> dist(n);
+    CUDA_CHECK(cudaMemcpy(dist.p, host.data(), n * sizeof(std::int32_t),
+                          cudaMemcpyHostToDevice));
+
+    // Two ping-pong frontiers plus the three per-level sub-frontiers. A single
+    // level can hold at most n vertices, so n is a safe bound for each.
+    DBuf<VertexId> fa(n), fb(n), b_low(n), b_mid(n), b_high(n);
+    // [0] = next-frontier size, [1..3] = low/mid/high bucket sizes.
+    DBuf<int> d_counts(4);
+    CUDA_CHECK(cudaMemcpy(fa.p, &source, sizeof(VertexId), cudaMemcpyHostToDevice));
+
+    VertexId* fin  = fa.p;
+    VertexId* fout = fb.p;
+    std::uint32_t in_count = 1;
+    int level = 0;
+    const int warps_per_block = kBlock / 32;   // 8
+
+    while (in_count > 0) {
+        // --- 1. Re-bucket this level's frontier by degree, on the device. ---
+        CUDA_CHECK(cudaMemset(d_counts.p, 0, 4 * sizeof(int)));
+        bfs_bucket_split<<<grid_for(in_count), kBlock>>>(
+            d.row.p, fin, in_count, b_low.p, b_mid.p, b_high.p,
+            d_counts.p + 1, d_counts.p + 2, d_counts.p + 3);
+        CUDA_CHECK(cudaGetLastError());
+
+        // The bucket sizes decide the three grid dimensions, so they must come
+        // back to the host before the expands launch. That is the price of
+        // per-level bucketing: two device→host syncs per level instead of T3's
+        // one — cheap on a shallow graph, visible on a high-diameter one.
+        int h[4] = {0, 0, 0, 0};
+        CUDA_CHECK(cudaMemcpy(h, d_counts.p, 4 * sizeof(int), cudaMemcpyDeviceToHost));
+        const std::uint32_t low_n  = static_cast<std::uint32_t>(h[1]);
+        const std::uint32_t mid_n  = static_cast<std::uint32_t>(h[2]);
+        const std::uint32_t high_n = static_cast<std::uint32_t>(h[3]);
+
+        // --- 2. Expand each bucket at its own granularity. ------------------
+        if (low_n)
+            bfs_expand_thread<<<grid_for(low_n), kBlock>>>(
+                d.row.p, d.col.p, dist.p, b_low.p, low_n, fout, d_counts.p, level);
+        if (mid_n)
+            bfs_expand_warp<<<static_cast<int>((mid_n + warps_per_block - 1) / warps_per_block),
+                              kBlock>>>(
+                d.row.p, d.col.p, dist.p, b_mid.p, mid_n, fout, d_counts.p, level);
+        if (high_n)
+            bfs_expand_block<<<high_n, kBlock>>>(
+                d.row.p, d.col.p, dist.p, b_high.p, high_n, fout, d_counts.p, level);
+        CUDA_CHECK(cudaGetLastError());
+
+        int h_out = 0;
+        CUDA_CHECK(cudaMemcpy(&h_out, d_counts.p, sizeof(int), cudaMemcpyDeviceToHost));
+        in_count = static_cast<std::uint32_t>(h_out);
         std::swap(fin, fout);
         ++level;
     }
@@ -587,6 +832,69 @@ std::vector<VertexId> wcc_opt(const CsrGraph& g) {
         CUDA_CHECK(cudaMemset(changed.p, 0, sizeof(int)));
         wcc_step_active<<<grid_for(n), kBlock>>>(d.row.p, d.col.p, label.p,
                                                  ain, aout, n, changed.p);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaMemcpy(&h_changed, changed.p, sizeof(int), cudaMemcpyDeviceToHost));
+        std::swap(ain, aout);
+    }
+    CUDA_CHECK(cudaMemcpy(host.data(), label.p, n * sizeof(VertexId), cudaMemcpyDeviceToHost));
+    return host;
+}
+
+
+std::vector<VertexId> wcc_lb(const CsrGraph& g) {
+    const std::uint32_t n = g.num_vertices;
+    std::vector<VertexId> host(n);
+    if (n == 0) return host;
+
+    // Degrees are static, so bucket once on the host (as in pagerank_lb).
+    std::vector<VertexId> low, mid, high;
+    low.reserve(n);
+    for (VertexId v = 0; v < n; ++v) {
+        EdgeId deg = g.row_offsets[v + 1] - g.row_offsets[v];
+        if (deg > kBlockThresh)     high.push_back(v);
+        else if (deg > kDegThresh)  mid.push_back(v);
+        else                        low.push_back(v);
+    }
+    const std::uint32_t low_n  = static_cast<std::uint32_t>(low.size());
+    const std::uint32_t mid_n  = static_cast<std::uint32_t>(mid.size());
+    const std::uint32_t high_n = static_cast<std::uint32_t>(high.size());
+
+    DeviceCsr d(g);
+    DBuf<VertexId> label(n);
+    DBuf<std::uint8_t> aa(n), ab(n);
+    DBuf<int> changed(1);
+    DBuf<VertexId> d_low(low_n ? low_n : 1), d_mid(mid_n ? mid_n : 1),
+                   d_high(high_n ? high_n : 1);
+    if (low_n)  CUDA_CHECK(cudaMemcpy(d_low.p, low.data(),
+                                      low_n * sizeof(VertexId), cudaMemcpyHostToDevice));
+    if (mid_n)  CUDA_CHECK(cudaMemcpy(d_mid.p, mid.data(),
+                                      mid_n * sizeof(VertexId), cudaMemcpyHostToDevice));
+    if (high_n) CUDA_CHECK(cudaMemcpy(d_high.p, high.data(),
+                                      high_n * sizeof(VertexId), cudaMemcpyHostToDevice));
+
+    wcc_init<<<grid_for(n), kBlock>>>(label.p, n);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemset(aa.p, 1, n));   // round 1: everyone active
+
+    const int warps_per_block = kBlock / 32;   // 8
+    const int low_grid = static_cast<int>((low_n + kBlock - 1) / kBlock);
+    const int mid_grid = static_cast<int>((mid_n + warps_per_block - 1) / warps_per_block);
+
+    std::uint8_t* ain  = aa.p;
+    std::uint8_t* aout = ab.p;
+    int h_changed = 1;
+    while (h_changed) {
+        CUDA_CHECK(cudaMemset(aout, 0, n));
+        CUDA_CHECK(cudaMemset(changed.p, 0, sizeof(int)));
+        if (low_n)
+            wcc_bucket_thread<<<low_grid, kBlock>>>(d.row.p, d.col.p, label.p,
+                ain, aout, d_low.p, low_n, changed.p);
+        if (mid_n)
+            wcc_bucket_warp<<<mid_grid, kBlock>>>(d.row.p, d.col.p, label.p,
+                ain, aout, d_mid.p, mid_n, changed.p);
+        if (high_n)
+            wcc_bucket_block<<<high_n, kBlock>>>(d.row.p, d.col.p, label.p,
+                ain, aout, d_high.p, high_n, changed.p);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaMemcpy(&h_changed, changed.p, sizeof(int), cudaMemcpyDeviceToHost));
         std::swap(ain, aout);

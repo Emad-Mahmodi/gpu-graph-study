@@ -27,6 +27,18 @@ std::vector<std::int32_t> bfs(const CsrGraph& g, VertexId source);
 // to the next frontier. Same distances as the T0 oracle.
 std::vector<std::int32_t> bfs_opt(const CsrGraph& g, VertexId source);
 
+// Tier T4 — degree-bucketed BFS. Unlike PageRank, whose gather touches every
+// vertex every iteration, BFS only expands the current frontier — so the
+// bucketing cannot be done once on the host. Each level the frontier is
+// re-partitioned *on the device* by out-degree into three sub-frontiers, and
+// each is expanded at the granularity that fits:
+//   low  (<= 32)     one thread per vertex
+//   mid  (33..1024)  one warp per vertex  (32 lanes stride col[], coalesced)
+//   high (> 1024)    one block per vertex (256 threads on a single hub)
+// This is the roadmap's "re-bucket between BFS levels". Distances are identical
+// to the T0 oracle.
+std::vector<std::int32_t> bfs_lb(const CsrGraph& g, VertexId source);
+
 std::vector<double> pagerank(const CsrGraph& g,
                              double damping   = 0.85,
                              int    max_iters = 100,
@@ -61,5 +73,14 @@ std::vector<VertexId> wcc(const CsrGraph& g);
 // sweeping all N vertices every round (T2). Same component labels as the T0
 // oracle.
 std::vector<VertexId> wcc_opt(const CsrGraph& g);
+
+// Tier T4 — degree-bucketed WCC. Keeps the T3 active-set (only vertices woken
+// last round are rescanned) but fixes the *other* half of the problem: a hub
+// with 10^5 neighbours was still scanned by a single thread. Degrees are static
+// here, so the three buckets are built once on the host, as in PageRank; each
+// round launches thread-/warp-/block-per-vertex kernels over them. The
+// warp/block kernels min-reduce the neighbour labels with __shfl_down_sync /
+// a shared-memory tree. Labels are identical to the T0 oracle.
+std::vector<VertexId> wcc_lb(const CsrGraph& g);
 
 }  // namespace ggs::cuda

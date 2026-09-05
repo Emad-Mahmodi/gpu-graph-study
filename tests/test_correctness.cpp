@@ -157,19 +157,28 @@ int main() {
             auto ds  = seq::bfs(big, 0);
             auto dc2 = cuda::bfs(big, 0);       // T2 naïve
             auto dc3 = cuda::bfs_opt(big, 0);   // T3 frontier
+            auto dc4 = cuda::bfs_lb(big, 0);    // T4 degree-bucketed frontier
             CHECK(ds == dc2, "CUDA T2 BFS matches sequential BFS (all distances)");
             CHECK(ds == dc3, "CUDA T3 BFS matches sequential BFS (all distances)");
+            CHECK(ds == dc4, "CUDA T4 BFS matches sequential BFS (all distances)");
         }
         // WCC T2 and T3 == T0 (same component labels).
         {
             auto ls  = seq::wcc(big);
             auto lc2 = cuda::wcc(big);       // T2 naïve
             auto lc3 = cuda::wcc_opt(big);   // T3 active-set
+            auto lc4 = cuda::wcc_lb(big);    // T4 degree-bucketed active-set
             CHECK(seq::count_components(ls) == seq::count_components(lc2),
                   "CUDA T2 WCC finds the same component count");
             CHECK(lc2 == lc3, "CUDA T3 WCC matches T2 WCC (all labels)");
             CHECK(seq::count_components(ls) == seq::count_components(lc3),
                   "CUDA T3 WCC finds the same component count");
+            // Label propagation converges to the minimum id per component
+            // regardless of the thread-to-vertex mapping, so T4 must be
+            // label-for-label identical, not merely component-count identical.
+            CHECK(lc2 == lc4, "CUDA T4 WCC matches T2 WCC (all labels)");
+            CHECK(seq::count_components(ls) == seq::count_components(lc4),
+                  "CUDA T4 WCC finds the same component count");
         }
         // PageRank T2 and T3 == T0 (within tolerance; atomic order differs).
         {
@@ -194,12 +203,16 @@ int main() {
             auto ds = seq::bfs(grid, 0);
             auto d2 = cuda::bfs(grid, 0);
             auto d3 = cuda::bfs_opt(grid, 0);
+            auto d4 = cuda::bfs_lb(grid, 0);
             CHECK(ds == d2, "CUDA T2 BFS matches seq on high-diameter grid");
             CHECK(ds == d3, "CUDA T3 BFS matches seq on high-diameter grid");
+            CHECK(ds == d4, "CUDA T4 BFS matches seq on high-diameter grid");
             auto ls = seq::wcc(grid);
             auto l3 = cuda::wcc_opt(grid);
+            auto l4 = cuda::wcc_lb(grid);
             CHECK(seq::count_components(ls) == seq::count_components(l3),
                   "CUDA T3 WCC matches seq component count on grid");
+            CHECK(l3 == l4, "CUDA T4 WCC matches T3 WCC on grid (all labels)");
         }
     } else {
         std::cout << "\n[CUDA] no device visible — GPU tiers not tested here.\n";

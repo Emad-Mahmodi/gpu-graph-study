@@ -13,7 +13,7 @@ This is an **empirical study**, not a claim of a new algorithm. Its value — li
   <a href="#references">References</a>
 </p>
 
-> **Status:** 🚧 Phases 1–5 complete — sequential (T0), OpenMP (T1), naïve CUDA (T2), optimized CUDA (T3) for BFS / PageRank / WCC, and **degree-bucketed load balancing (T4)** for PageRank, plus a sequential Louvain (T0) and a binary→call-graph extractor. Every GPU result is validated against the T0 oracle (GPU correctness, including a 254-level high-diameter case, is a CI test), and every GPU number is reported against **both** a single CPU core and the full 8-core OpenMP tier. Headline findings, all honest: **(1)** the GPU optimizations are large and real *as techniques* — PageRank goes from a **0.48× naïve loss to 5.16× faster than naïve GPU** across T3 (parallel reduction) + T4 (degree-bucketing), each speedup attributable to one named technique; **(2)** the best traversal strategy **depends on graph diameter** (the frontier/active-set optimization loses on shallow graphs, wins 2.4× on high-diameter ones); **(3)** on *this* hardware — an entry-level 4 GB T600 vs a strong 8-core i7 — the **multi-core CPU still edges the GPU on these mid-size graphs** (T4 closes to within 15%), a candid result about entry GPUs, not a marketing number. A 100M+-edge scale study is next on the [roadmap](#roadmap).
+> **Status:** ✅ Phases 1–5 complete — sequential (T0), OpenMP (T1), naïve CUDA (T2), optimized CUDA (T3) and **degree-bucketed load balancing (T4)** for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. Every GPU result is validated against the T0 oracle (GPU correctness, including a 254-level high-diameter case, is a CI test), and every GPU number is reported against **both** a single CPU core and the full 8-core OpenMP tier. Headline findings, all honest: **(1)** the optimizations are large and real *as techniques*, each attributable to one named change — PageRank goes from a **0.48× naïve loss to 5.16× faster than naïve GPU** (T3 parallel reduction + T4 degree-bucketing), and **BFS from a 0.76× T3 loss to 2.62× faster than T3** by bucketing alone; **(2)** which optimization wins is decided by *graph shape*, on two independent axes — the frontier/active-set optimization (T3) pays off in proportion to **diameter**, degree-bucketing (T4) in proportion to **degree skew**, and each is a measured *loss* in the other regime; **(3)** on *this* hardware — an entry-level 4 GB T600 vs a strong 8-core i7 — the multi-core CPU wins on most of these mid-size graphs, with **one exception: bucketed BFS on a power-law graph beats the 8-core CPU by 1.38×**, the study's best GPU result. A 100M+-edge scale study is next on the [roadmap](#roadmap).
 
 ---
 
@@ -38,9 +38,9 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 
 | Algorithm | T0 · Seq C++ | T1 · OpenMP | T2 · Naïve CUDA | T3 · Optimized CUDA | T4 · Advanced |
 |---|:--:|:--:|:--:|:--:|:--:|
-| **BFS** | ✅ | ✅ | ✅ | ✅ | ⬜ |
+| **BFS** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **PageRank** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Connected Components (WCC)** | ✅ | ✅ | ✅ | ✅ | ⬜ |
+| **Connected Components (WCC)** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Community Detection (Louvain)** | ✅ | ⬜ | ⬜ | ⬜ | — |
 
 **What each tier isolates**
@@ -222,41 +222,112 @@ is, which is set by the graph's **diameter**. So we measured both regimes:
 
 | Algorithm | Graph | CPU 1-core | CPU 8-core | Naïve CUDA (T2) | Optimized (T3) | T3 vs T2 |
 |---|---|--:|--:|--:|--:|:--:|
-| **BFS** | RMAT (depth 4)    | 153.1 ms | **75.2 ms** | 102.3 ms | 138.6 ms | 0.74× |
-| **BFS** | Grid (depth 2046) | **17.5 ms** | 36.9 ms | 200.1 ms | 83.9 ms | **2.38×** |
-| **WCC** | RMAT (depth 4)    | 218.7 ms | **46.2 ms** | 88.7 ms | 96.4 ms | 0.92× |
-| **WCC** | Grid (depth 2046) | 19.5 ms | **9.3 ms** | 521.5 ms | 397.9 ms | **1.31×** |
+| **BFS** | RMAT (depth 4)    | 149.7 ms | **72.4 ms** | 104.1 ms | 137.8 ms | 0.76× |
+| **BFS** | Grid (depth 2046) | **17.3 ms** | 36.0 ms | 204.3 ms | 82.8 ms | **2.47×** |
+| **WCC** | RMAT (depth 4)    | 207.7 ms | **44.5 ms** | 89.0 ms | 96.2 ms | 0.93× |
+| **WCC** | Grid (depth 2046) | 20.1 ms | **7.3 ms** | 529.5 ms | 409.2 ms | **1.29×** |
+
+*These traversal rows and the T4 table below come from one sweep
+(`scripts/traversal_lb.ps1` → `results/traversal_lb.csv`), because attributing
+T4 requires T0–T4 measured back to back. They therefore differ by ~2% from the
+Phase 3 table above, which is its own internally consistent session — no table
+here mixes runs.*
 
 Two findings, both honest, both the point of a *study*:
 
 1. **The frontier/active-set optimization only pays off on high-diameter graphs.**
    On shallow RMAT the frontier is nearly all of N, so the naïve full-scan (T2)
    already does the right amount of work and the worklist bookkeeping (atomics,
-   per-round `memset`) is pure overhead — T3 *loses* (0.74× / 0.92×). On the
+   per-round `memset`) is pure overhead — T3 *loses* (0.76× / 0.93×). On the
    grid the frontier is ~√N per level, so skipping the idle vertices makes T3
-   **2.38× faster than T2** for BFS. Same code, opposite verdict — decided by
+   **2.47× faster than T2** for BFS. Same code, opposite verdict — decided by
    diameter.
 
 2. **On high-diameter graphs the GPU itself is the wrong tool** — the CPU wins
-   outright (BFS: 17.5 ms single-core vs 83.9 ms for the best GPU tier). With
+   outright (BFS: 17.3 ms single-core vs 82.8 ms for the best GPU tier). With
    2046 levels of ~1000 vertices each, every kernel launch and per-level host
    sync is amortized over almost no work: the GPU is **launch/latency-bound**,
    while the CPU walks the frontier in cache. T3 recovers a lot *within* the GPU
    tiers, but cannot close the gap. A neat side-detail: for grid BFS even
-   *OpenMP is slower than one core* (36.9 vs 17.5 ms) — so little parallel work
+   *OpenMP is slower than one core* (36.0 vs 17.3 ms) — so little parallel work
    per level that thread overhead dominates there too. This is the regime where
    direction-optimizing BFS and CPU/GPU hybrids exist — and knowing *which*
    regime you are in is the practical takeaway.
 
 Security graphs (call-graphs, network-flow graphs) are power-law and **shallow**
-— the RMAT regime — so the practical verdict for the domain is: on mid-size
-graphs a strong multi-core CPU is the sensible default, the naïve GPU tier does
-*not* justify the frontier optimization, and the GPU becomes attractive only at
-larger scale (the roadmap's scale study) or with the T4 load-balancing tier. The
-grid is the controlled contrast that explains *why* the diameter, not the raw
-size, decides which strategy wins.
+— the RMAT regime — so the verdict *at this tier* is: the frontier optimization
+is not what these graphs need, and a strong multi-core CPU is still the sensible
+default. The grid is the controlled contrast that explains *why* the diameter,
+not the raw size, decides which strategy wins. What the T3 measurement does not
+tell you is what these graphs need *instead* — and the next tier answers that:
+degree-bucketing, on the same shallow RMAT graph where T3 lost, is the one thing
+in this study that beats the 8-core CPU.
 
 Run it yourself: `run_bench --algo bfs --tier cuda_opt --grid 1024`.
+
+#### Traversal T4 — degree-bucketed BFS / WCC (Phase 5)
+
+T3 fixed *which* vertices run each round. It did not fix *how* one runs: a
+thread owning this graph's 138,626-neighbour hub still walked that list alone
+while its 31 warp-mates held degree-1 leaves. T4 applies the same three-level
+Gunrock/Merrill bucketing that PageRank uses — with one structural difference
+that turns out to matter:
+
+- **PageRank and WCC bucket once, on the host.** Every vertex is a candidate
+  every round and degrees never change, so a single static split is enough.
+- **BFS must re-bucket every level, on the device.** The frontier is a
+  *different* set of vertices at each level, so a split kernel re-partitions it
+  each round — the roadmap's "re-bucket between BFS levels". The price is a
+  second device→host sync per level, to size the three expand grids.
+
+Crucially, T4 does not do *less* work than T3: it visits exactly the same edges
+and claims vertices with the same `atomicCAS`. Only the mapping of threads to
+edges changes, which is what makes the speedup attributable to one named
+technique.
+
+![Load-balanced (T4) traversal](docs/img/cuda_t4_traversal.png)
+
+| Algorithm | Graph | CPU 1-core | CPU 8-core | Naïve (T2) | Optimized (T3) | **Bucketed (T4)** | T4 vs T3 | T4 vs T2 |
+|---|---|--:|--:|--:|--:|--:|:--:|:--:|
+| **BFS** | RMAT — max degree 138,626 | 149.7 ms | 72.4 ms | 104.1 ms | 137.8 ms | **52.6 ms** | **2.62×** | **1.98×** |
+| **BFS** | Grid — every degree ≤ 4    | **17.3 ms** | 36.0 ms | 204.3 ms | 82.8 ms | 154.1 ms | 0.54× | 1.33× |
+| **WCC** | RMAT — max degree 138,626 | 207.7 ms | **44.5 ms** | 89.0 ms | 96.2 ms | 76.3 ms | **1.26×** | 1.17× |
+| **WCC** | Grid — every degree ≤ 4    | 20.1 ms | **7.3 ms** | 529.5 ms | 409.2 ms | 490.6 ms | 0.83× | 1.08× |
+
+Three findings:
+
+1. **BFS on a power-law graph is where this repo's argument finally lands.**
+   T4 is **2.62× faster than T3**, **1.98× faster than the naïve GPU**, and —
+   for the first time anywhere in this study — **faster than the full 8-core
+   CPU** (52.6 ms vs 72.4 ms, **1.38×**). The attribution is unusually clean
+   because T3 was a *loss* on this graph (0.76× vs T2): the frontier worklist
+   alone made BFS slower, and it is the degree-bucketing alone that turns it
+   into the study's best GPU result. Load imbalance, not the frontier, was the
+   binding constraint all along.
+
+2. **On the uniform-degree grid, bucketing is pure overhead** — 0.54× for BFS
+   and 0.83× for WCC against T3. Every grid vertex has degree ≤ 4, so all of
+   them land in the low bucket: the split kernel, the three launches and the
+   extra per-level sync buy nothing and cost a lot. BFS suffers worst because
+   its 2046 levels pay that overhead 2046 times over. Same code, opposite
+   verdict — and this time the deciding property is degree **skew**, not
+   diameter.
+
+3. **WCC improves but does not catch the CPU** (76.3 ms vs 44.5 ms). Bucketing
+   gives a real 1.26×, but label propagation does little work per round over
+   many rounds, so the GPU never amortizes its launch and sync cost the way
+   PageRank's 100 dense iterations do.
+
+Taken together the two traversal studies isolate two *independent* graph
+properties: **T3's payoff is set by diameter** (how big the frontier is) and
+**T4's by degree skew** (how imbalanced the per-vertex work is). Security
+graphs — call-graphs, network-flow graphs — are shallow *and* skewed, i.e.
+precisely the regime where T3 loses and T4 wins, which is what the RMAT rows
+above measure. That is a concrete, testable recommendation for the domain
+rather than a generic "use a GPU".
+
+Run it yourself: `run_bench --algo bfs --tier cuda_lb --rmat 20 --ef 16`.
+*Regenerate the whole table: `powershell -ExecutionPolicy Bypass -File .\scripts\traversal_lb.ps1`.*
 
 ---
 
@@ -318,7 +389,8 @@ which is exactly what lets one study span both security domains.
 .
 ├── core/
 │   ├── graph/      # csr.{hpp,cpp}, generator.{hpp,cpp}  — CSR + RMAT
-│   └── cpu/        # algorithms.{hpp,cpp}                — T0 seq (the oracle)
+│   ├── cpu/        # algorithms*.{hpp,cpp}, louvain.*    — T0 seq (oracle) + T1 OpenMP
+│   └── cuda/       # cuda_algorithms.{hpp,cu}             — T2 / T3 / T4 GPU tiers
 ├── bench/          # timer.hpp                           — median-of-N harness
 ├── apps/           # run_bench.cpp                       — unified CLI driver
 ├── tests/          # test_correctness.cpp               — known-answer tests (CI)
@@ -360,7 +432,7 @@ Every number is regenerated by `scripts/run_benchmarks.sh`; raw CSVs live in `re
 - [x] **Phase 2 — Parallel CPU (T1).** ✅ OpenMP BFS/PageRank/WCC, validated against T0; thread-scaling study (chart above); PowerShell benchmark runner.
 - [x] **Phase 3 — GPU (T2).** ✅ Naïve CUDA for BFS/PageRank/WCC, validated against T0 (GPU correctness now a CI test); naïve-vs-CPU study (chart above).
 - [x] **Phase 4 — Optimization (T3).** ✅ PageRank: block-level reductions + precomputed inverse degree (0.43×→1.62× vs CPU, 3.8× vs naïve). ✅ BFS (frontier worklist) + WCC (active-set): a diameter-dependent crossover study — T3 loses on shallow graphs, wins 2.4× on high-diameter ones; GPU shown to be launch-bound in the high-diameter regime.
-- [~] **Phase 5 — Advanced load balancing (T4).** ✅ PageRank: full three-level degree scheduling (thread → warp → block per vertex), 5.16× over naïve GPU, closes to within 15% of the 8-core CPU; the block-per-hub level is measured to hit diminishing returns on this graph (documented). ⬜ BFS/WCC load balancing next.
+- [x] **Phase 5 — Advanced load balancing (T4).** ✅ PageRank: full three-level degree scheduling (thread → warp → block per vertex), 5.16× over naïve GPU, closes to within 15% of the 8-core CPU; the block-per-hub level is measured to hit diminishing returns on this graph (documented). ✅ BFS: per-level *device-side* re-bucketing of the frontier — 2.62× over T3, and the first GPU tier here to beat the 8-core CPU (1.38×). ✅ WCC: static bucketing over the T3 active set, 1.26× over T3. ✅ Skew-crossover study: bucketing is measured to be a net *loss* (0.54×) on a uniform-degree graph — the mirror image of T3's diameter crossover.
 - [ ] **Phase 6 — Scale & writeup.** Louvain; scale study to 100M+ edges; cross-dataset generalization on IDS data; `docs/` paper draft → arXiv preprint.
 
 Detailed weekly milestones in [`docs/ROADMAP.md`](docs/ROADMAP.md).
