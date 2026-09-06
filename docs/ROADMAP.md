@@ -70,12 +70,26 @@ tests, and produces a benchmark row — never a half-finished tier.
   and on a uniform-degree grid bucketing is a net **loss** (0.54× for BFS) —
   the mirror image of T3's diameter crossover, on the orthogonal axis of skew.
 
-## Phase 6 — Scale, extra algorithm, writeup — ~2–3 weeks
-- [x] Louvain community detection at T0 (sequential); T1/T2 still open
-- [ ] Scale study: RMAT to 100M+ edges; scalability curves
+## Phase 6 — Scale, extra algorithm, writeup (in progress)
+- [x] Scale study: RMAT 2¹⁸ → 2²³ (8.4M → 268M directed edges), every tier at
+      every size in one session; scalability curves in `docs/img/scale_study.png`
+- [x] Louvain at T1 (OpenMP), with the chunk-count quality/speed ablation and a
+      thread-count-independence test
+- [ ] Louvain GPU tier (T2)
 - [ ] Cross-dataset generalization on IDS graphs (CICIDS→UNSW), mirroring ref [1]
 - [ ] `docs/paper/` draft; figures auto-generated from `results/`
 - **Milestone:** arXiv-ready preprint + a repo any reviewer can reproduce.
+- **Result so far:** the scale study answers the question the earlier phases
+  could not. At the single size this repo used to report (33.5M edges) the
+  8-core CPU won almost everything; by 268M edges PageRank T4 is **2.00×** the
+  8-core CPU, BFS **1.58×**, and WCC has climbed from 0.47× to exactly
+  break-even. Nothing in the kernels changed — only the graph grew, so the old
+  verdict was a statement about problem size, not about the hardware. Two
+  results worth keeping: **naïve CUDA (T2) never justifies itself** at any size
+  tested (it only reaches the CPU at 268M, where the optimized tiers are already
+  at 1.6–2.0×), and WCC's crossover sits just past what a 4 GB card can hold.
+  Louvain is the one algorithm whose parallel tier cannot reproduce the oracle;
+  it trades ~6% of modularity for 3–7×, and the trade is measured, not assumed.
 
 ## Ground rules (kept every phase)
 1. Nothing merges unless it builds and `ctest` is green.

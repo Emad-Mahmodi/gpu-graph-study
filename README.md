@@ -13,7 +13,7 @@ This is an **empirical study**, not a claim of a new algorithm. Its value — li
   <a href="#references">References</a>
 </p>
 
-> **Status:** ✅ Phases 1–5 complete — sequential (T0), OpenMP (T1), naïve CUDA (T2), optimized CUDA (T3) and **degree-bucketed load balancing (T4)** for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. Every GPU result is validated against the T0 oracle (GPU correctness, including a 254-level high-diameter case, is a CI test), and every GPU number is reported against **both** a single CPU core and the full 8-core OpenMP tier. Headline findings, all honest: **(1)** the optimizations are large and real *as techniques*, each attributable to one named change — PageRank goes from a **0.48× naïve loss to 5.16× faster than naïve GPU** (T3 parallel reduction + T4 degree-bucketing), and **BFS from a 0.76× T3 loss to 2.62× faster than T3** by bucketing alone; **(2)** which optimization wins is decided by *graph shape*, on two independent axes — the frontier/active-set optimization (T3) pays off in proportion to **diameter**, degree-bucketing (T4) in proportion to **degree skew**, and each is a measured *loss* in the other regime; **(3)** on *this* hardware — an entry-level 4 GB T600 vs a strong 8-core i7 — the multi-core CPU wins on most of these mid-size graphs, with **one exception: bucketed BFS on a power-law graph beats the 8-core CPU by 1.38×**, the study's best GPU result. A 100M+-edge scale study is next on the [roadmap](#roadmap).
+> **Status:** ✅ Phases 1–5 complete — sequential (T0), OpenMP (T1), naïve CUDA (T2), optimized CUDA (T3) and **degree-bucketed load balancing (T4)** for BFS / PageRank / WCC, plus a sequential Louvain (T0) and a binary→call-graph extractor. Every GPU result is validated against the T0 oracle (GPU correctness, including a 254-level high-diameter case, is a CI test), and every GPU number is reported against **both** a single CPU core and the full 8-core OpenMP tier. Headline findings, all honest: **(1)** the optimizations are large and real *as techniques*, each attributable to one named change — PageRank goes from a **0.48× naïve loss to 5.16× faster than naïve GPU** (T3 parallel reduction + T4 degree-bucketing), and **BFS from a 0.76× T3 loss to 2.62× faster than T3** by bucketing alone; **(2)** which optimization wins is decided by *graph shape*, on two independent axes — the frontier/active-set optimization (T3) pays off in proportion to **diameter**, degree-bucketing (T4) in proportion to **degree skew**, and each is a measured *loss* in the other regime; **(3)** the CPU-versus-GPU verdict is a property of **problem size**, not of the hardware — a scale study from 8.4M to **268M directed edges** shows PageRank going from a 0.91× loss at the size this repo used to report to **2.00× the 8-core CPU** at 268M, with no code change at all, while naïve CUDA (T2) never justifies itself at any size tested. A GPU-vs-CPU number quoted without the graph size is not a result.
 
 ---
 
@@ -41,7 +41,7 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 | **BFS** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **PageRank** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Connected Components (WCC)** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Community Detection (Louvain)** | ✅ | ⬜ | ⬜ | ⬜ | — |
+| **Community Detection (Louvain)** | ✅ | ✅ᵇ | ⬜ | ⬜ | — |
 
 **What each tier isolates**
 
@@ -51,7 +51,7 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 - **T3 Optimized CUDA** — shared-memory frontiers, memory coalescing, warp primitives (`__shfl`, `__ballot`), kernel fusion.
 - **T4 Advanced** — well-known load-balancing strategies for skewed degree (thread-/warp-/block-per-vertex bucketing, à la Gunrock/Merrill), applied and measured on security graphs. Documented as **established technique**, not a novel contribution.
 
-Louvain is the hardest to parallelize on a GPU and is scoped last; it may stop at T2.
+ᵇ Louvain is the one tier that cannot return the oracle's answer: sequential Louvain is order-dependent by construction, so T1 is contracted on *quality* (within ~6% of the oracle's modularity) rather than on equality. See [Louvain at T1](#phase-6--louvain-at-t1-the-algorithm-that-resists-parallelism). A GPU tier is still open.
 
 ---
 
@@ -329,6 +329,118 @@ rather than a generic "use a GPU".
 Run it yourself: `run_bench --algo bfs --tier cuda_lb --rmat 20 --ef 16`.
 *Regenerate the whole table: `powershell -ExecutionPolicy Bypass -File .\scripts\traversal_lb.ps1`.*
 
+### Phase 6 — Scale study: 0.5M to 268M edges
+
+Every result above was measured at one size (2²⁰ vertices, 33.5M edges), and at
+that size a strong 8-core i7 beat this entry-level T600 nearly everywhere. That
+left the study's most important question unanswered: was that a fact about the
+**hardware**, or about the **problem size**? A GPU pays fixed costs —
+host↔device transfer, kernel launches, a host sync per round — and a small
+graph gives it too little work to amortize them.
+
+So the whole tier stack was re-run across RMAT 2¹⁸ → 2²³, i.e. **8.4M to 268M
+directed edges** (8.4M vertices, max degree 486,556 at the top end), every tier
+at every size in one session.
+
+![Scale study](docs/img/scale_study.png)
+
+**T4 GPU vs the full 8-core CPU, as the graph grows:**
+
+| Directed edges | 8.4M | 16.8M | 33.5M | 67.1M | 134M | 268M |
+|---|:--:|:--:|:--:|:--:|:--:|:--:|
+| **BFS**      | 1.37× | 1.15× | 1.17× | 1.17× | **1.31×** | **1.58×** |
+| **PageRank** | 0.97× | 0.96× | 0.91× | **1.08×** | **1.54×** | **2.00×** |
+| **WCC**      | 0.47× | 0.59× | 0.63× | 0.50× | 0.65× | **1.00×** |
+
+The answer is unambiguous: **it was the problem size.**
+
+- **PageRank crosses over at 67M edges** and reaches **2.00× the 8-core CPU** at
+  268M — having been a 0.91× *loss* at the 33.5M size this repo used to report.
+  Nothing about the code changed between those two numbers; only the graph grew.
+- **BFS is above the CPU across the whole range** and pulls away with size
+  (1.17× → 1.58×).
+- **WCC climbs steadily and reaches exactly break-even (1.00×) at 268M edges** —
+  the honest reading is that its crossover is just past the largest graph this
+  4 GB card can hold, not that it does not exist.
+
+The log-log panels show why. Every tier scales close to linearly in edges, so
+the *ordering* is decided by the constant factor each tier carries, and the GPU
+constants (transfer, launch, sync) are the ones that shrink relative to the work
+as the graph grows. This is also the cleanest statement of the study's thesis:
+a GPU-versus-CPU verdict quoted without the problem size is not a result.
+
+Two corollaries worth stating plainly, because they cut against the usual
+marketing:
+
+1. **Naive CUDA (T2) never justifies itself.** It only reaches the 8-core CPU at
+   268M edges (BFS 1.07×, PageRank 1.08×) — the size at which the *optimized*
+   tiers are already at 1.6–2.0×. Writing the obvious GPU port and stopping
+   there gets you a slower program than your CPU on every graph tested here.
+2. **The entry-level card is not the bottleneck people assume.** A 4 GB T600 is
+   about as modest as a discrete CUDA GPU gets, and it still doubles a strong
+   8-core CPU on PageRank once the graph is large enough to keep it busy.
+
+*Regenerate: `powershell -ExecutionPolicy Bypass -File .\scripts\scale_study.ps1` (~40 min) → `results/scale_study.csv`, then `python scripts/make_scale_chart.py`.*
+
+### Phase 6 — Louvain at T1: the algorithm that resists parallelism
+
+The other three algorithms have a parallel tier that returns *the same answer*
+as the T0 oracle. Louvain cannot, and saying otherwise would be dishonest.
+Sequential Louvain is Gauss-Seidel: it moves one vertex at a time and every move
+is immediately visible to the next vertex, so the result is a function of the
+visiting order. Any parallel formulation gives that up.
+
+This tier is Jacobi with a chunked barrier — vertices decide from a shared
+snapshot, but a pass is split into a few sequential chunks so each chunk sees
+the previous one's moves (Lu, Halappanavar & Kalyanaraman, *Parallel Computing*
+2015). Two safeguards: the **min-label rule**, which stops two singleton
+vertices from swapping communities forever, and a **modularity guard** that
+measures Q after each pass and rolls the pass back if it did not improve — so
+this tier is monotone in Q like the oracle, at the cost of one extra O(m) sweep
+per pass.
+
+The chunk count is the single design parameter, and it is a direct quality/speed
+dial. Measured on RMAT 2¹⁷, 8 threads, against the oracle's 1840 ms / Q = 0.0792:
+
+| chunks per pass | time | Q | quality vs T0 | speedup |
+|---|--:|--:|:--:|:--:|
+| 1 (pure Jacobi) | 240 ms | 0.0575 | 72.6% | 7.67× |
+| **4** (shipped) | **507 ms** | **0.0741** | **93.6%** | **3.63×** |
+| 16 | 900 ms | 0.0745 | 94.1% | 2.05× |
+| 64 | 1868 ms | 0.0762 | 96.2% | 0.99× |
+| 256 | 2860 ms | 0.0765 | 96.6% | 0.64× |
+
+The knee is unambiguous: 1 → 4 chunks buys 21 points of community quality for a
+2.1× slowdown, while 4 → 16 buys half a point for another 1.8×. By 64 chunks
+the "parallel" tier has given up its entire advantage (0.99×), and beyond that
+it is **slower than the single-core oracle it is meant to accelerate**. Shipping
+pure Jacobi because it posts a 7.7× number would mean quietly returning
+communities a quarter worse than the reference — exactly the kind of speedup
+this study exists to refuse.
+
+The Q column is identical across repeated runs of this table: the tier is
+deterministic, so only the timings move with thermal conditions.
+
+At the shipped setting, across sizes:
+
+| RMAT scale | T0 | T1 (8 threads) | speedup | quality |
+|---|--:|--:|:--:|:--:|
+| 2¹⁴ | 185 ms | 62 ms | 2.96× | 92.4% |
+| 2¹⁶ | 843 ms | 205 ms | 4.11× | 93.4% |
+| 2¹⁷ | 1932 ms | 506 ms | 3.82× | 93.6% |
+| 2¹⁸ | 6220 ms | 867 ms | **7.18×** | 93.9% |
+
+So the honest summary for Louvain is: **~6% of the modularity buys 3–7×**,
+and that trade is stated rather than hidden. One property the parallel tier has
+that the oracle does not: because every vertex decides from a snapshot rather
+than from whatever its neighbours did first, the result does **not depend on the
+thread count** — 1 thread and 16 threads produce identical communities, which is
+a CI assertion, not a claim.
+
+Run it yourself: `run_bench --algo louvain --tier openmp --rmat 17 --ef 16`.
+*Regenerate: `.\scripts\louvain_chunks.ps1` → `results/louvain_chunks.csv` (the ablation) and
+`.\scripts\louvain_scale.ps1` → `results/louvain_scale.csv` (the size table).*
+
 ---
 
 ## Quick start
@@ -389,7 +501,7 @@ which is exactly what lets one study span both security domains.
 .
 ├── core/
 │   ├── graph/      # csr.{hpp,cpp}, generator.{hpp,cpp}  — CSR + RMAT
-│   ├── cpu/        # algorithms*.{hpp,cpp}, louvain.*    — T0 seq (oracle) + T1 OpenMP
+│   ├── cpu/        # algorithms*.*, louvain*.*          — T0 seq (oracle) + T1 OpenMP
 │   └── cuda/       # cuda_algorithms.{hpp,cu}             — T2 / T3 / T4 GPU tiers
 ├── bench/          # timer.hpp                           — median-of-N harness
 ├── apps/           # run_bench.cpp                       — unified CLI driver
@@ -433,7 +545,7 @@ Every number is regenerated by `scripts/run_benchmarks.sh`; raw CSVs live in `re
 - [x] **Phase 3 — GPU (T2).** ✅ Naïve CUDA for BFS/PageRank/WCC, validated against T0 (GPU correctness now a CI test); naïve-vs-CPU study (chart above).
 - [x] **Phase 4 — Optimization (T3).** ✅ PageRank: block-level reductions + precomputed inverse degree (0.43×→1.62× vs CPU, 3.8× vs naïve). ✅ BFS (frontier worklist) + WCC (active-set): a diameter-dependent crossover study — T3 loses on shallow graphs, wins 2.4× on high-diameter ones; GPU shown to be launch-bound in the high-diameter regime.
 - [x] **Phase 5 — Advanced load balancing (T4).** ✅ PageRank: full three-level degree scheduling (thread → warp → block per vertex), 5.16× over naïve GPU, closes to within 15% of the 8-core CPU; the block-per-hub level is measured to hit diminishing returns on this graph (documented). ✅ BFS: per-level *device-side* re-bucketing of the frontier — 2.62× over T3, and the first GPU tier here to beat the 8-core CPU (1.38×). ✅ WCC: static bucketing over the T3 active set, 1.26× over T3. ✅ Skew-crossover study: bucketing is measured to be a net *loss* (0.54×) on a uniform-degree graph — the mirror image of T3's diameter crossover.
-- [ ] **Phase 6 — Scale & writeup.** Louvain; scale study to 100M+ edges; cross-dataset generalization on IDS data; `docs/` paper draft → arXiv preprint.
+- [~] **Phase 6 — Scale & writeup.** ✅ Scale study to 268M edges: every tier at every size from 2¹⁸ to 2²³, showing the CPU/GPU crossover and that T2 never pays off. ✅ Louvain T1 (OpenMP), with the chunk-count quality/speed ablation and a thread-count-independence test. ⬜ Louvain GPU tier. ⬜ Cross-dataset generalization on IDS data. ⬜ `docs/` paper draft → arXiv preprint.
 
 Detailed weekly milestones in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

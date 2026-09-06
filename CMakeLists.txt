@@ -19,6 +19,7 @@ add_library(ggs_core
   core/cpu/algorithms.cpp
   core/cpu/algorithms_omp.cpp
   core/cpu/louvain.cpp
+  core/cpu/louvain_omp.cpp
 )
 target_include_directories(ggs_core PUBLIC ${CMAKE_SOURCE_DIR})
 

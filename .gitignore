@@ -15,6 +15,9 @@ results/*.csv
 !results/benchmarks.csv
 !results/scaling.csv
 !results/traversal_lb.csv
+!results/scale_study.csv
+!results/louvain_chunks.csv
+!results/louvain_scale.csv
 .DS_Store
 *.nsys-rep
 *.ncu-rep

@@ -19,6 +19,7 @@
 #include "../core/cpu/algorithms.hpp"
 #include "../core/cpu/algorithms_omp.hpp"
 #include "../core/cpu/louvain.hpp"
+#include "../core/cpu/louvain_omp.hpp"
 #include "../core/graph/csr.hpp"
 #include "../core/graph/generator.hpp"
 #ifdef HAVE_CUDA
@@ -121,7 +122,7 @@ int main(int argc, char** argv) {
 #endif
 
     // The GPU tiers T2/T3/T4 all implement bfs, pagerank and wcc.
-    // Louvain is sequential-only (see the roadmap).
+    // Louvain has T0 and T1 only (no GPU tier yet -- see the roadmap).
     if (any_cuda && a.algo == "louvain") {
         std::cerr << "louvain has no GPU tier; use --tier seq.\n";
         return 3;
@@ -169,12 +170,11 @@ int main(int argc, char** argv) {
         }, a.repeats);
         result_summary = "components=" + std::to_string(seq::count_components(lbl));
     } else if (a.algo == "louvain") {
-        if (!seq_tier) {
-            std::cerr << "louvain currently has a sequential (T0) tier only; use --tier seq.\n";
-            return 3;
-        }
         seq::LouvainResult lr;
-        ms = time_median_ms([&]{ lr = seq::louvain(g); }, a.repeats);
+        ms = time_median_ms([&]{
+            if (seq_tier) lr = seq::louvain(g);
+            else          lr = omp::louvain(g);   // T1
+        }, a.repeats);
         char buf[96];
         std::snprintf(buf, sizeof(buf), "communities=%u modularity=%.4f levels=%d",
                       lr.num_communities, lr.modularity, lr.levels);

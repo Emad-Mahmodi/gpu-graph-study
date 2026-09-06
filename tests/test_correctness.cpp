@@ -10,6 +10,10 @@
 #include "../core/cpu/algorithms.hpp"
 #include "../core/cpu/algorithms_omp.hpp"
 #include "../core/cpu/louvain.hpp"
+#include "../core/cpu/louvain_omp.hpp"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include "../core/graph/csr.hpp"
 #include "../core/graph/generator.hpp"
 #ifdef HAVE_CUDA
@@ -143,6 +147,68 @@ int main() {
         CHECK(lr.num_communities >= 1 && lr.num_communities <= big.num_vertices,
               "Louvain community count is sane on RMAT graph");
     }
+
+    // ====================================================================
+    // Louvain T1 (OpenMP). This is the one tier that CANNOT be diffed against
+    // the oracle label-for-label: sequential Louvain is order-dependent by
+    // construction, so the parallel (Jacobi) formulation reaches a different
+    // local optimum. The contract is therefore on structure and on quality.
+    // ====================================================================
+    {
+        // On the tiny graph the answer is unambiguous, so T1 must still nail it.
+        auto lp = omp::louvain(g);
+        CHECK(lp.num_communities == 2, "Louvain T1 finds 2 communities on the test graph");
+        CHECK(lp.community[0] == lp.community[1] &&
+              lp.community[1] == lp.community[2] &&
+              lp.community[2] == lp.community[3],
+              "Louvain T1 groups the 4-cycle {0,1,2,3} together");
+        CHECK(lp.community[4] == lp.community[5] &&
+              lp.community[5] == lp.community[6],
+              "Louvain T1 groups the triangle {4,5,6} together");
+        CHECK(lp.community[0] != lp.community[4],
+              "Louvain T1 separates the two communities");
+    }
+    {
+        auto ls = seq::louvain(big);
+        auto lp = omp::louvain(big);
+        CHECK(lp.modularity > 0.0 && lp.modularity <= 1.0,
+              "Louvain T1 modularity in valid range on RMAT graph");
+        // Quality, not equality. A parallel community detector that quietly
+        // returned worse structure would pass every "is this a valid partition"
+        // check, so the contract has to be on Q itself.
+        //
+        // The bar is 0.90, set from measurement rather than taste: with the
+        // shipped kChunks=4 this tier lands at 92.4% of the oracle here (RMAT
+        // scale 14) and 93.4-93.9% on scales 16-18. It is deliberately loose
+        // enough not to flag that known, documented ~6% quality cost -- and
+        // tight enough to catch the regression it exists for: pure Jacobi local
+        // moving (kChunks=1) scores 72.6%, which this rejects.
+        CHECK(lp.modularity > ls.modularity * 0.90,
+              "Louvain T1 modularity within 10% of the T0 oracle");
+        // Every vertex must carry a label inside the reported range.
+        bool labels_ok = lp.community.size() == big.num_vertices;
+        for (VertexId v = 0; v < big.num_vertices && labels_ok; ++v)
+            if (lp.community[v] >= lp.num_communities) labels_ok = false;
+        CHECK(labels_ok, "Louvain T1 labels are dense and in range");
+    }
+#ifdef _OPENMP
+    {
+        // The parallel formulation reads a snapshot and a fixed edge order, so
+        // its result must not depend on how many threads ran it. Sequential
+        // Louvain has no such guarantee; this is the property that makes T1
+        // reproducible, and it is worth a test rather than a claim.
+        const int saved = omp_get_max_threads();
+        omp_set_num_threads(1);
+        auto a1 = omp::louvain(big);
+        omp_set_num_threads(saved > 1 ? saved : 2);
+        auto a2 = omp::louvain(big);
+        omp_set_num_threads(saved);
+        CHECK(a1.community == a2.community,
+              "Louvain T1 is deterministic: 1 thread and N threads agree exactly");
+        CHECK(std::abs(a1.modularity - a2.modularity) < 1e-12,
+              "Louvain T1 modularity is thread-count independent");
+    }
+#endif
 
 #ifdef HAVE_CUDA
     // ====================================================================
