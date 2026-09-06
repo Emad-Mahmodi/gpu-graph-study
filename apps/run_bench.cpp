@@ -121,10 +121,10 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    // The GPU tiers T2/T3/T4 all implement bfs, pagerank and wcc.
-    // Louvain has T0 and T1 only (no GPU tier yet -- see the roadmap).
-    if (any_cuda && a.algo == "louvain") {
-        std::cerr << "louvain has no GPU tier; use --tier seq.\n";
+    // Louvain has a naive GPU tier (T2) but no T3/T4 yet.
+    if ((cuda_opt_tier || cuda_lb_tier) && a.algo == "louvain") {
+        std::cerr << "louvain has tiers seq, openmp and cuda; T3/T4 are not implemented yet.";
+        std::cerr << std::endl;
         return 3;
     }
 
@@ -172,8 +172,11 @@ int main(int argc, char** argv) {
     } else if (a.algo == "louvain") {
         seq::LouvainResult lr;
         ms = time_median_ms([&]{
-            if (seq_tier) lr = seq::louvain(g);
-            else          lr = omp::louvain(g);   // T1
+            if (seq_tier)      lr = seq::louvain(g);
+            else if (omp_tier) lr = omp::louvain(g);    // T1
+#ifdef HAVE_CUDA
+            else               lr = cuda::louvain(g);   // T2
+#endif
         }, a.repeats);
         char buf[96];
         std::snprintf(buf, sizeof(buf), "communities=%u modularity=%.4f levels=%d",

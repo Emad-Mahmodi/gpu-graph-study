@@ -75,7 +75,18 @@ tests, and produces a benchmark row — never a half-finished tier.
       every size in one session; scalability curves in `docs/img/scale_study.png`
 - [x] Louvain at T1 (OpenMP), with the chunk-count quality/speed ablation and a
       thread-count-independence test
-- [ ] Louvain GPU tier (T2)
+- [x] Louvain at T2 (naïve CUDA). Sort-based rather than hash-table-based on
+      purpose: a hash table needs an overflow path for extreme hubs, which is
+      most of the T4 machinery, and building it here would make the later
+      speedup unattributable. Beats the 8-core CPU from 2¹⁶ upward (9.31× a
+      single core at 2¹⁸) at ~73% of the oracle's modularity.
+- [ ] Louvain T3: restore the incremental visibility that took T1 from 72.6% to
+      93.6% quality, without giving up the GPU's parallelism
+- [ ] Louvain T4: degree-bucketed accumulator sizing. Note this was originally
+      marked "not applicable" — wrongly. Louvain needs a per-vertex accumulator
+      over *distinct neighbouring communities*, whose size is set by degree, so
+      bucketing is the precondition for using shared memory here rather than an
+      optimization on top.
 - [ ] Cross-dataset generalization on IDS graphs (CICIDS→UNSW), mirroring ref [1]
 - [ ] `docs/paper/` draft; figures auto-generated from `results/`
 - **Milestone:** arXiv-ready preprint + a repo any reviewer can reproduce.
@@ -88,8 +99,13 @@ tests, and produces a benchmark row — never a half-finished tier.
   results worth keeping: **naïve CUDA (T2) never justifies itself** at any size
   tested (it only reaches the CPU at 268M, where the optimized tiers are already
   at 1.6–2.0×), and WCC's crossover sits just past what a 4 GB card can hold.
-  Louvain is the one algorithm whose parallel tier cannot reproduce the oracle;
-  it trades ~6% of modularity for 3–7×, and the trade is measured, not assumed.
+  Louvain is the one algorithm whose parallel tiers cannot reproduce the oracle.
+  T1 trades ~6% of modularity for 3.6–6.5×. T2 is faster still — 9.31× a single
+  core, beating the 8-core CPU from 2¹⁶ up — but at ~73% of the oracle's
+  modularity, and the two numbers are never quoted apart. The 73% is the same
+  figure the CPU chunk ablation measured for pure simultaneous updates (72.6%),
+  reproduced by unrelated code on different hardware: the loss belongs to the
+  formulation, not to an implementation.
 
 ## Ground rules (kept every phase)
 1. Nothing merges unless it builds and `ctest` is green.

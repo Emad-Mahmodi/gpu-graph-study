@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../graph/csr.hpp"
+#include "../cpu/louvain.hpp"   // reuse seq::LouvainResult
 
 namespace ggs::cuda {
 
@@ -82,5 +83,30 @@ std::vector<VertexId> wcc_opt(const CsrGraph& g);
 // warp/block kernels min-reduce the neighbour labels with __shfl_down_sync /
 // a shared-memory tree. Labels are identical to the T0 oracle.
 std::vector<VertexId> wcc_lb(const CsrGraph& g);
+
+// Tier T2 - naive CUDA Louvain community detection.
+//
+// Louvain needs something the other three algorithms never do: for each vertex,
+// the sum of edge weights to *each distinct neighbouring community*. On the CPU
+// that is a dense array of size n per thread. With tens of thousands of GPU
+// threads in flight that is not an option, and it is the whole difficulty of
+// putting Louvain on a GPU.
+//
+// The obvious answer is a per-warp hash table in shared memory -- but a hub with
+// half a million neighbours can touch more distinct communities than any shared
+// table holds, so a hash table needs an overflow path, which is most of the work
+// the T4 tier is supposed to isolate. Doing it here would make the later
+// speedup unattributable.
+//
+// So T2 does the plainly correct thing instead: label every arc with
+// (owner vertex, neighbour community), sort, and segment-reduce. No capacity
+// limit, no special case, no tuning -- and predictably slow, which is exactly
+// what an honest baseline tier is for.
+//
+// Like the OpenMP tier, this cannot reproduce the T0 oracle's labels (sequential
+// Louvain is order-dependent by construction), so it is contracted on modularity
+// rather than on equality.
+seq::LouvainResult louvain(const CsrGraph& g, int max_passes = 100,
+                           double min_gain = 1e-9);
 
 }  // namespace ggs::cuda

@@ -262,6 +262,50 @@ int main() {
             CHECK(e3 < 1e-9, "CUDA T3 PageRank matches sequential within 1e-9");
             CHECK(e4 < 1e-9, "CUDA T4 PageRank matches sequential within 1e-9");
         }
+        // Louvain T2 (naive CUDA). Like T1 this cannot reproduce the oracle's
+        // labels, and unlike T1 it does not even try to match its quality:
+        // T2 applies every vertex's move simultaneously (pure Jacobi), which
+        // the CPU chunk ablation measured at ~73% of the oracle's modularity.
+        // The tests below pin both halves of that: unambiguous structure must
+        // still come out exactly right, and the known quality loss must stay
+        // where it was measured rather than drifting further.
+        {
+            CsrGraph tiny = make_test_graph();
+            auto ls = seq::louvain(tiny);
+            auto lg = cuda::louvain(tiny);
+            CHECK(lg.num_communities == 2,
+                  "CUDA T2 Louvain finds 2 communities on the test graph");
+            CHECK(lg.community[0] == lg.community[1] &&
+                  lg.community[1] == lg.community[2] &&
+                  lg.community[2] == lg.community[3],
+                  "CUDA T2 Louvain groups the 4-cycle {0,1,2,3} together");
+            CHECK(lg.community[4] == lg.community[5] &&
+                  lg.community[5] == lg.community[6],
+                  "CUDA T2 Louvain groups the triangle {4,5,6} together");
+            CHECK(lg.community[0] != lg.community[4],
+                  "CUDA T2 Louvain separates the two communities");
+            // On a graph this unambiguous there is nothing for the parallel
+            // formulation to get wrong, so here it must match the oracle exactly.
+            CHECK(std::abs(lg.modularity - ls.modularity) < 1e-9,
+                  "CUDA T2 Louvain matches the oracle's Q on the test graph");
+        }
+        {
+            auto ls = seq::louvain(big);
+            auto lg = cuda::louvain(big);
+            bool labels_ok = lg.community.size() == big.num_vertices;
+            for (VertexId v = 0; v < big.num_vertices && labels_ok; ++v)
+                if (lg.community[v] >= lg.num_communities) labels_ok = false;
+            CHECK(labels_ok, "CUDA T2 Louvain labels are dense and in range");
+            CHECK(lg.modularity > 0.0 && lg.modularity <= 1.0,
+                  "CUDA T2 Louvain modularity in valid range");
+            // The bar is 0.60, not the 0.90 used for T1: this tier is *expected*
+            // to lose quality and measures ~73% of the oracle. The assertion is
+            // a floor against real breakage, and the gap itself is reported in
+            // the README rather than hidden behind a loose threshold.
+            CHECK(lg.modularity > ls.modularity * 0.60,
+                  "CUDA T2 Louvain modularity above the naive-tier floor (60%)");
+        }
+
         // High-diameter grid: the real test of the many-level frontier /
         // active-set kernels (254 levels here vs ~4 on RMAT).
         {

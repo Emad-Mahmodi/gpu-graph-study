@@ -37,7 +37,7 @@ include(CheckLanguage)
 check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
-  add_library(ggs_cuda STATIC core/cuda/cuda_algorithms.cu)
+  add_library(ggs_cuda STATIC core/cuda/cuda_algorithms.cu core/cuda/cuda_louvain.cu)
   target_include_directories(ggs_cuda PUBLIC ${CMAKE_SOURCE_DIR})
   # Turing (T600) = compute capability 7.5. Add more archs if you retarget.
   set_target_properties(ggs_cuda PROPERTIES CUDA_ARCHITECTURES 75)

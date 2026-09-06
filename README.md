@@ -41,7 +41,7 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 | **BFS** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **PageRank** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Connected Components (WCC)** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Community Detection (Louvain)** | ✅ | ✅ᵇ | ⬜ | ⬜ | — |
+| **Community Detection (Louvain)** | ✅ | ✅ᵇ | ✅ᵇ | ⬜ | ⬜ᶜ |
 
 **What each tier isolates**
 
@@ -51,7 +51,9 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 - **T3 Optimized CUDA** — shared-memory frontiers, memory coalescing, warp primitives (`__shfl`, `__ballot`), kernel fusion.
 - **T4 Advanced** — well-known load-balancing strategies for skewed degree (thread-/warp-/block-per-vertex bucketing, à la Gunrock/Merrill), applied and measured on security graphs. Documented as **established technique**, not a novel contribution.
 
-ᵇ Louvain is the one tier that cannot return the oracle's answer: sequential Louvain is order-dependent by construction, so T1 is contracted on *quality* (within ~6% of the oracle's modularity) rather than on equality. See [Louvain at T1](#phase-6--louvain-at-t1-the-algorithm-that-resists-parallelism). A GPU tier is still open.
+ᵇ Louvain is the one algorithm whose parallel tiers cannot return the oracle's answer: sequential Louvain is order-dependent by construction, so T1 and T2 are contracted on *quality* rather than on equality, and neither is ever quoted without its modularity column. See [Louvain](#phase-6--louvain-at-t1-the-algorithm-that-resists-parallelism).
+
+ᶜ This cell used to read “—”, on the assumption that degree-bucketed load balancing had nothing to say about community detection. That was wrong, and implementing T2 is what showed it: Louvain needs, per vertex, the summed weight to each *distinct neighbouring community*, and the size of that accumulator is set by the vertex's degree. For BFS, PageRank and WCC, bucketing by degree was an optimization; for Louvain it is the precondition for using shared memory at all. T4 is therefore planned, not inapplicable.
 
 ---
 
@@ -423,14 +425,14 @@ deterministic, so only the timings move with thermal conditions.
 
 At the shipped setting, across sizes:
 
-| RMAT scale | T0 | T1 (8 threads) | speedup | quality |
+| RMAT scale | T0 oracle | T1 · 8 threads | speedup | quality |
 |---|--:|--:|:--:|:--:|
-| 2¹⁴ | 185 ms | 62 ms | 2.96× | 92.4% |
-| 2¹⁶ | 843 ms | 205 ms | 4.11× | 93.4% |
-| 2¹⁷ | 1932 ms | 506 ms | 3.82× | 93.6% |
-| 2¹⁸ | 6220 ms | 867 ms | **7.18×** | 93.9% |
+| 2¹⁴ | 241 ms | 66 ms | 3.64× | 92.4% |
+| 2¹⁶ | 796 ms | 200 ms | 3.98× | 93.4% |
+| 2¹⁷ | 1758 ms | 433 ms | 4.06× | 93.6% |
+| 2¹⁸ | 4910 ms | 761 ms | **6.45×** | 93.9% |
 
-So the honest summary for Louvain is: **~6% of the modularity buys 3–7×**,
+So the honest summary for Louvain at T1 is: **~6% of the modularity buys 3.6–6.5×**,
 and that trade is stated rather than hidden. One property the parallel tier has
 that the oracle does not: because every vertex decides from a snapshot rather
 than from whatever its neighbours did first, the result does **not depend on the
@@ -440,6 +442,58 @@ a CI assertion, not a claim.
 Run it yourself: `run_bench --algo louvain --tier openmp --rmat 17 --ef 16`.
 *Regenerate: `.\scripts\louvain_chunks.ps1` → `results/louvain_chunks.csv` (the ablation) and
 `.\scripts\louvain_scale.ps1` → `results/louvain_scale.csv` (the size table).*
+
+#### Louvain T2 — and the number that confirmed the diagnosis
+
+The GPU tier needs something the other three algorithms never do: for each
+vertex, the summed weight to *each distinct neighbouring community*. On the CPU
+that is a dense array of size n per thread. With tens of thousands of GPU
+threads in flight it cannot be, and that single requirement is the whole
+difficulty of putting Louvain on a GPU.
+
+The obvious GPU answer is a per-warp hash table in shared memory. T2 does not
+use one, on purpose: a hub with half a million neighbours can touch more
+distinct communities than any shared table holds, so a hash table needs an
+overflow path — which is most of the degree-bucketed machinery T4 exists to
+isolate. Building it here would make the later speedup unattributable. So T2
+does the plainly correct thing instead: label every arc with
+`(owner vertex, neighbour community)`, sort, and reduce equal keys. No capacity
+limit, no special case, no tuning — and predictably slow, which is what an
+honest baseline is for. The same primitive builds the next level's graph, with
+the key changed to `(community of u, community of v)`.
+
+| RMAT scale | T0 oracle | T1 · 8 threads | T2 · CUDA | T2 vs one core | T1 quality | **T2 quality** |
+|---|--:|--:|--:|:--:|:--:|:--:|
+| 2¹⁴ | 241 ms | 66 ms | 72 ms | 3.34× | 92.4% | **72.7%** |
+| 2¹⁶ | 796 ms | 200 ms | **158 ms** | 5.04× | 93.4% | **72.3%** |
+| 2¹⁷ | 1758 ms | 433 ms | **278 ms** | 6.32× | 93.6% | **73.9%** |
+| 2¹⁸ | 4910 ms | 761 ms | **527 ms** | **9.31×** | 93.9% | **73.9%** |
+
+Read the speed column alone and this is the best Louvain tier in the repo: from
+2¹⁶ upward the GPU beats the full 8-core CPU, reaching 9.3× a single core.
+Read the quality column and it is the worst: **~73% of the oracle's modularity,
+against T1's ~94%**. Quoting the 9.3× without the 73% would be precisely the
+kind of number this study exists to refuse — so the two columns are never
+printed apart.
+
+**Why it is 73%, and how we know.** T2 applies every vertex's move
+simultaneously — pure Jacobi, with no chunking. The CPU ablation had already
+measured what that costs: at `kChunks = 1`, **72.6%** of the oracle's
+modularity. The GPU, on the same graph, lands at **73.9%**:
+
+| | implementation | accumulator | hardware | quality vs oracle |
+|---|---|---|---|:--:|
+| CPU, `kChunks=1` | OpenMP | dense array per thread | i7-11850H | 72.6% |
+| GPU, T2 | CUDA | global sort + segmented reduce | T600 | 73.9% |
+
+Two implementations that share no code, two different accumulator strategies,
+two different processors — same number. That is the useful kind of confirmation:
+the quality loss is a property of the **simultaneous-update formulation**, not
+of any one implementation, and not a bug. It also says exactly what T3 has to
+do — restore incremental visibility (the chunking that took T1 from 72.6% to
+93.6%) without giving up the GPU's parallelism.
+
+Run it yourself: `run_bench --algo louvain --tier cuda --rmat 17 --ef 16`.
 
 ---
 
@@ -545,7 +599,7 @@ Every number is regenerated by `scripts/run_benchmarks.sh`; raw CSVs live in `re
 - [x] **Phase 3 — GPU (T2).** ✅ Naïve CUDA for BFS/PageRank/WCC, validated against T0 (GPU correctness now a CI test); naïve-vs-CPU study (chart above).
 - [x] **Phase 4 — Optimization (T3).** ✅ PageRank: block-level reductions + precomputed inverse degree (0.43×→1.62× vs CPU, 3.8× vs naïve). ✅ BFS (frontier worklist) + WCC (active-set): a diameter-dependent crossover study — T3 loses on shallow graphs, wins 2.4× on high-diameter ones; GPU shown to be launch-bound in the high-diameter regime.
 - [x] **Phase 5 — Advanced load balancing (T4).** ✅ PageRank: full three-level degree scheduling (thread → warp → block per vertex), 5.16× over naïve GPU, closes to within 15% of the 8-core CPU; the block-per-hub level is measured to hit diminishing returns on this graph (documented). ✅ BFS: per-level *device-side* re-bucketing of the frontier — 2.62× over T3, and the first GPU tier here to beat the 8-core CPU (1.38×). ✅ WCC: static bucketing over the T3 active set, 1.26× over T3. ✅ Skew-crossover study: bucketing is measured to be a net *loss* (0.54×) on a uniform-degree graph — the mirror image of T3's diameter crossover.
-- [~] **Phase 6 — Scale & writeup.** ✅ Scale study to 268M edges: every tier at every size from 2¹⁸ to 2²³, showing the CPU/GPU crossover and that T2 never pays off. ✅ Louvain T1 (OpenMP), with the chunk-count quality/speed ablation and a thread-count-independence test. ⬜ Louvain GPU tier. ⬜ Cross-dataset generalization on IDS data. ⬜ `docs/` paper draft → arXiv preprint.
+- [~] **Phase 6 — Scale & writeup.** ✅ Scale study to 268M edges: every tier at every size from 2¹⁸ to 2²³, showing the CPU/GPU crossover and that naïve CUDA never pays off. ✅ Louvain T1 (OpenMP), with the chunk-count quality/speed ablation and a thread-count-independence test. ✅ Louvain T2 (naïve CUDA, sort-based): faster than the 8-core CPU from 2¹⁶ up, at ~73% of the oracle's modularity — the same figure the CPU ablation predicted for simultaneous updates, on unrelated code and different hardware. ⬜ Louvain T3/T4. ⬜ Cross-dataset generalization on IDS data. ⬜ `docs/` paper draft → arXiv preprint.
 
 Detailed weekly milestones in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

@@ -1,6 +1,6 @@
 # scripts/louvain_scale.ps1
-# How the parallel (T1) Louvain tier behaves as the graph grows: speedup over
-# the T0 oracle, and how much community quality that speedup costs.
+# How the parallel Louvain tiers behave as the graph grows: T1 (OpenMP) and
+# T2 (naive CUDA) against the T0 oracle, in both speed and community quality.
 #
 # Louvain is the one algorithm in this study whose parallel tier cannot return
 # the oracle's answer (sequential Louvain is order-dependent by construction),
@@ -28,24 +28,32 @@ function Get-Field($row, $name) {
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
-"scale,vertices,edges,t0_ms,t0_modularity,t1_ms,t1_modularity,speedup,quality_pct" |
+"scale,vertices,edges,tier,median_ms,modularity,speedup_vs_t0,quality_pct" |
     Out-File -Encoding utf8 $Out
 
+# tier label -> the --tier flag it maps to
+$tiers = [ordered]@{ "T0" = "seq"; "T1" = "openmp"; "T2" = "cuda" }
+
 foreach ($s in $Scales) {
-    $a = (& $Bin --algo louvain --tier seq --rmat $s --ef $EdgeFactor --repeats $Repeats) -split ','
-    $env:OMP_NUM_THREADS = $Threads
-    $b = (& $Bin --algo louvain --tier openmp --rmat $s --ef $EdgeFactor --repeats $Repeats) -split ','
-    Remove-Item Env:\OMP_NUM_THREADS -ErrorAction SilentlyContinue
+    $t0 = 0.0; $q0 = 0.0
+    foreach ($tier in $tiers.Keys) {
+        if ($tiers[$tier] -eq "openmp") { $env:OMP_NUM_THREADS = $Threads }
+        $f = (& $Bin --algo louvain --tier $tiers[$tier] --rmat $s --ef $EdgeFactor --repeats $Repeats) -split ','
+        Remove-Item Env:\OMP_NUM_THREADS -ErrorAction SilentlyContinue
+        if ($LASTEXITCODE -ne 0) { Write-Error "run failed: louvain $tier scale $s"; exit 1 }
 
-    $t0 = [double]$a[7]; $q0 = [double](Get-Field $a 'modularity')
-    $t1 = [double]$b[7]; $q1 = [double](Get-Field $b 'modularity')
-    $sp = $t0 / $t1
-    $qp = $q1 / $q0 * 100
+        $ms = [double]$f[7]
+        $q  = [double](Get-Field $f 'modularity')
+        if ($tier -eq "T0") { $t0 = $ms; $q0 = $q }
+        $sp = $t0 / $ms
+        $qp = $q / $q0 * 100
 
-    ("{0},{1},{2},{3},{4},{5},{6},{7:N2},{8:N1}" -f `
-        $s, $a[3], $a[4], $t0, $q0, $t1, $q1, $sp, $qp) | Out-File -Append -Encoding utf8 $Out
-    Write-Host ("2^{0,-3} T0 {1,8:N0} ms Q={2:N4}   T1 {3,8:N0} ms Q={4:N4}   {5:N2}x   quality {6:N1}%" -f `
-        $s, $t0, $q0, $t1, $q1, $sp, $qp)
+        ("{0},{1},{2},{3},{4},{5},{6:N2},{7:N1}" -f `
+            $s, $f[3], $f[4], $tier, $ms, $q, $sp, $qp) | Out-File -Append -Encoding utf8 $Out
+        Write-Host ("2^{0,-3} {1}  {2,9:N0} ms   Q={3:N4}   {4,5:N2}x vs one core   quality {5,5:N1}%" -f `
+            $s, $tier, $ms, $q, $sp, $qp)
+    }
+    Write-Host ""
 }
 
 Write-Host ("Wrote " + $Out) -ForegroundColor Green
