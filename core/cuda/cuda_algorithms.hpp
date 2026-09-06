@@ -109,4 +109,33 @@ std::vector<VertexId> wcc_lb(const CsrGraph& g);
 seq::LouvainResult louvain(const CsrGraph& g, int max_passes = 100,
                            double min_gain = 1e-9);
 
+// Tier T3 - optimized CUDA Louvain. Same algorithm and the same accept rule as
+// T2; only the grouping changes. T2 sorts one global array of 64-bit
+// (vertex, community) keys, then binary-searches to find where each vertex's
+// entries begin. T3 sorts *inside each CSR row instead*, on plain 32-bit
+// community ids, over only the bits an id can occupy. A row is already a
+// segment, so the owner array, the composite key and the search all disappear.
+seq::LouvainResult louvain_opt(const CsrGraph& g, int max_passes = 100,
+                               double min_gain = 1e-9);
+
+// The two T3 groupings, kept selectable so the choice between them stays a
+// measurement rather than a claim. `segmented = true` sorts inside each CSR row
+// (cub segmented radix sort); `false` sorts globally but only over the bits a
+// composite key can actually use. louvain_opt() calls whichever won.
+seq::LouvainResult louvain_opt_variant(const CsrGraph& g, bool segmented,
+                                       int max_passes = 100,
+                                       double min_gain = 1e-9);
+
+// Tier T4 - degree-bucketed Louvain. The profile of T2/T3 put ~2/3 of the run
+// in building each vertex's weight-per-neighbouring-community, so T4 drops the
+// sort and accumulates into an open-addressed hash table instead. That needs
+// capacity, capacity is set by degree, and one size cannot serve a degree-4
+// leaf and a degree-59,000 hub -- which is why bucketing is the precondition
+// here rather than an optimization layered on top:
+//   deg <= 32     one warp  per vertex, 64-slot table in shared memory
+//   deg <= 1024   one block per vertex, 2048-slot table in shared memory
+//   deg >  1024   one block per vertex, table in global memory
+seq::LouvainResult louvain_lb(const CsrGraph& g, int max_passes = 100,
+                              double min_gain = 1e-9);
+
 }  // namespace ggs::cuda

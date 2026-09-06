@@ -41,7 +41,7 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 | **BFS** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **PageRank** | ✅ | ✅ | ✅ | ✅ | ✅ |
 | **Connected Components (WCC)** | ✅ | ✅ | ✅ | ✅ | ✅ |
-| **Community Detection (Louvain)** | ✅ | ✅ᵇ | ✅ᵇ | ⬜ | ⬜ᶜ |
+| **Community Detection (Louvain)** | ✅ | ✅ᵇ | ✅ᵇ | ✅ᵇ | ✅ᵇ |
 
 **What each tier isolates**
 
@@ -53,7 +53,7 @@ Following the tiered-benchmark structure of [4], every algorithm is implemented 
 
 ᵇ Louvain is the one algorithm whose parallel tiers cannot return the oracle's answer: sequential Louvain is order-dependent by construction, so T1 and T2 are contracted on *quality* rather than on equality, and neither is ever quoted without its modularity column. See [Louvain](#phase-6--louvain-at-t1-the-algorithm-that-resists-parallelism).
 
-ᶜ This cell used to read “—”, on the assumption that degree-bucketed load balancing had nothing to say about community detection. That was wrong, and implementing T2 is what showed it: Louvain needs, per vertex, the summed weight to each *distinct neighbouring community*, and the size of that accumulator is set by the vertex's degree. For BFS, PageRank and WCC, bucketing by degree was an optimization; for Louvain it is the precondition for using shared memory at all. T4 is therefore planned, not inapplicable.
+ᶜ The Louvain T4 cell used to read “—”, on the assumption that degree-bucketed load balancing had nothing to say about community detection. That was wrong, and building the GPU tiers is what showed it: Louvain needs, per vertex, the summed weight to each *distinct neighbouring community*, and the capacity of that accumulator is set by degree. For BFS, PageRank and WCC, bucketing was an optimization; for Louvain it is the precondition for using shared memory at all.
 
 ---
 
@@ -427,12 +427,12 @@ At the shipped setting, across sizes:
 
 | RMAT scale | T0 oracle | T1 · 8 threads | speedup | quality |
 |---|--:|--:|:--:|:--:|
-| 2¹⁴ | 241 ms | 66 ms | 3.64× | 92.4% |
-| 2¹⁶ | 796 ms | 200 ms | 3.98× | 93.4% |
-| 2¹⁷ | 1758 ms | 433 ms | 4.06× | 93.6% |
-| 2¹⁸ | 4910 ms | 761 ms | **6.45×** | 93.9% |
+| 2¹⁴ | 146 ms | 62 ms | 2.34× | 92.4% |
+| 2¹⁶ | 712 ms | 189 ms | 3.76× | 93.4% |
+| 2¹⁷ | 1612 ms | 463 ms | 3.48× | 93.6% |
+| 2¹⁸ | 4211 ms | 741 ms | **5.69×** | 93.9% |
 
-So the honest summary for Louvain at T1 is: **~6% of the modularity buys 3.6–6.5×**,
+So the honest summary for Louvain at T1 is: **~6% of the modularity buys 2.3–5.7×**,
 and that trade is stated rather than hidden. One property the parallel tier has
 that the oracle does not: because every vertex decides from a snapshot rather
 than from whatever its neighbours did first, the result does **not depend on the
@@ -464,17 +464,18 @@ the key changed to `(community of u, community of v)`.
 
 | RMAT scale | T0 oracle | T1 · 8 threads | T2 · CUDA | T2 vs one core | T1 quality | **T2 quality** |
 |---|--:|--:|--:|:--:|:--:|:--:|
-| 2¹⁴ | 241 ms | 66 ms | 72 ms | 3.34× | 92.4% | **72.7%** |
-| 2¹⁶ | 796 ms | 200 ms | **158 ms** | 5.04× | 93.4% | **72.3%** |
-| 2¹⁷ | 1758 ms | 433 ms | **278 ms** | 6.32× | 93.6% | **73.9%** |
-| 2¹⁸ | 4910 ms | 761 ms | **527 ms** | **9.31×** | 93.9% | **73.9%** |
+| 2¹⁴ | 146 ms | 62 ms | 69 ms | 2.10× | 92.4% | **72.7%** |
+| 2¹⁶ | 712 ms | 189 ms | **156 ms** | 4.57× | 93.4% | **72.3%** |
+| 2¹⁷ | 1612 ms | 463 ms | **285 ms** | 5.66× | 93.6% | **73.9%** |
+| 2¹⁸ | 4211 ms | 741 ms | **533 ms** | **7.90×** | 93.9% | **73.9%** |
 
-Read the speed column alone and this is the best Louvain tier in the repo: from
-2¹⁶ upward the GPU beats the full 8-core CPU, reaching 9.3× a single core.
-Read the quality column and it is the worst: **~73% of the oracle's modularity,
-against T1's ~94%**. Quoting the 9.3× without the 73% would be precisely the
-kind of number this study exists to refuse — so the two columns are never
-printed apart.
+Read the speed column alone and the GPU already looks like the best Louvain
+tier here: from 2¹⁶ upward it beats the full 8-core CPU. Read the quality
+column and it is the worst: **~73% of the oracle's modularity, against T1's
+~94%**. Quoting the speedup without the 73% would be precisely the kind of
+number this study exists to refuse — so the two columns are never printed
+apart. Every GPU tier below shares this exact modularity, so from here on the
+quality column separates CPU from GPU, never one GPU tier from another.
 
 **Why it is 73%, and how we know.** T2 applies every vertex's move
 simultaneously — pure Jacobi, with no chunking. The CPU ablation had already
@@ -494,6 +495,92 @@ do — restore incremental visibility (the chunking that took T1 from 72.6% to
 93.6%) without giving up the GPU's parallelism.
 
 Run it yourself: `run_bench --algo louvain --tier cuda --rmat 17 --ef 16`.
+
+#### Louvain T3 and T4 — measuring first, then optimizing
+
+The GPU tiers all share one accept rule, so they return **identical
+modularity** (a CI assertion, not a hope). Only the way each vertex's
+weight-per-neighbouring-community gets built changes — which makes the run
+times directly comparable.
+
+**T3 attacked the wrong thing twice before the profile was consulted.** The
+first attempt replaced T2's global sort with cub's *segmented* sort, one
+segment per CSR row: structurally the obvious improvement, and **0.46–0.57× —
+a clear loss**. Segmented radix sort carries a per-segment cost, and this graph
+has hundreds of thousands of segments averaging 32 entries. The second attempt
+kept the global sort but bounded it to the bits a `(vertex, community)` key can
+actually occupy — 36 bits instead of 64 on a 2¹⁸-vertex level. That won, but
+only by 1.02–1.12×.
+
+Two optimizations of the same phase, both nearly free of effect, is a signal.
+So the tiers were instrumented per phase (`GGS_LOUVAIN_PROFILE=1`) instead of
+optimized further on instinct:
+
+| phase | T2 · global sort | T3 · bounded sort | T4 · bucketed hash |
+|---|--:|--:|--:|
+| **grouping** (build + choose) | 277.5 ms (68%) | 216.9 ms (63%) | **131.5 ms (51%)** |
+| modularity guard | 40.4 ms | 35.8 ms | 35.1 ms |
+| aggregation *(shared code)* | 91.1 ms | 91.6 ms | 89.7 ms |
+| **total** | 408.9 ms | 344.3 ms | **256.4 ms** |
+
+Grouping *was* the dominant phase all along — T3's bounded sort did cut it by
+22%, but aggregation and the guard were untouched, and Amdahl's law turned that
+into 11% overall. Aggregation is deliberately the same code in every tier, and
+its flat 91 / 92 / 90 ms is the control that says the difference really is the
+grouping and nothing else.
+
+**T4 removes the sort entirely**, accumulating into an open-addressed hash
+table per vertex. That needs capacity; capacity is set by degree; and one size
+cannot serve a degree-4 leaf and a degree-59,714 hub. So vertices are bucketed
+by degree and each bucket gets both the right table and the right hardware:
+one warp per vertex up to degree 32, one block per vertex to 1024, and a
+global-memory table for the hubs above that.
+
+| RMAT scale | T0 oracle | T1 · 8 threads | T2 | T3 | **T4** | T4 vs one core | T4 vs 8-core CPU |
+|---|--:|--:|--:|--:|--:|:--:|:--:|
+| 2¹⁴ | 146 ms | 62 ms | 69 ms | 50 ms | **35 ms** | 4.12× | 1.77× |
+| 2¹⁶ | 712 ms | 189 ms | 156 ms | 142 ms | **111 ms** | 6.42× | 1.70× |
+| 2¹⁷ | 1612 ms | 463 ms | 285 ms | 278 ms | **220 ms** | 7.34× | 2.10× |
+| 2¹⁸ | 4211 ms | 741 ms | 533 ms | 516 ms | **412 ms** | **10.22×** | **1.80×** |
+
+#### The bug the density sweep caught
+
+T4's first version sized its hash table by degree **bucket** — 64 slots for the
+low bucket, a fixed 2048 for the mid one. It measured as a wash on the default
+graph, so before shipping it, density was swept:
+
+| average degree | T2 | T3 | T4 *(bucket-sized)* | T4 *(vertex-sized)* |
+|---|--:|--:|:--:|:--:|
+| 16 | 130 ms | 98 ms | 1.08× | **1.23×** |
+| 32 | 149 ms | 142 ms | 1.13× | **1.28×** |
+| 64 | 235 ms | 220 ms | 0.86× | **1.25×** |
+| 128 | 399 ms | 376 ms | 0.55× | **1.23×** |
+| 256 | 692 ms | 665 ms | **0.44×** | **1.18×** |
+
+*(ratios are against T3)*
+
+The bucket-sized version did not just fail to scale — it **degraded**, to 0.44×
+at average degree 256. The reason is that clearing and scanning a hash table
+costs its *capacity*, not the vertex's degree. Raising density pushes vertices
+out of the cheap 64-slot bucket into the fixed 2048-slot one, where a
+degree-100 vertex clears and scans 2048 entries to store 100. The fix is one
+line of intent: **the bucket picks the hardware, the vertex's own degree picks
+the capacity.** With the table sized as the next power of two above 2·degree,
+the regression disappears and T4 wins across the whole density range.
+
+That is why this sweep is a committed script rather than a one-off: the failure
+mode is invisible at the default density and only appears when the graph gets
+denser.
+
+**Where the remaining time is.** In T4 the grouping phase is down to 51% and
+**aggregation has risen to 35%** — it is now the largest untouched cost, and
+the obvious next target. Naming that from a profile rather than guessing is the
+whole point of having measured.
+
+Run it yourself: `run_bench --algo louvain --tier cuda_lb --rmat 18 --ef 16`.
+*Regenerate: `.\scripts\louvain_scale.ps1` (the ladder) and
+`.\scripts\louvain_density.ps1` (the density sweep). Set
+`GGS_LOUVAIN_PROFILE=1` for the phase breakdown.*
 
 ---
 
@@ -599,7 +686,7 @@ Every number is regenerated by `scripts/run_benchmarks.sh`; raw CSVs live in `re
 - [x] **Phase 3 — GPU (T2).** ✅ Naïve CUDA for BFS/PageRank/WCC, validated against T0 (GPU correctness now a CI test); naïve-vs-CPU study (chart above).
 - [x] **Phase 4 — Optimization (T3).** ✅ PageRank: block-level reductions + precomputed inverse degree (0.43×→1.62× vs CPU, 3.8× vs naïve). ✅ BFS (frontier worklist) + WCC (active-set): a diameter-dependent crossover study — T3 loses on shallow graphs, wins 2.4× on high-diameter ones; GPU shown to be launch-bound in the high-diameter regime.
 - [x] **Phase 5 — Advanced load balancing (T4).** ✅ PageRank: full three-level degree scheduling (thread → warp → block per vertex), 5.16× over naïve GPU, closes to within 15% of the 8-core CPU; the block-per-hub level is measured to hit diminishing returns on this graph (documented). ✅ BFS: per-level *device-side* re-bucketing of the frontier — 2.62× over T3, and the first GPU tier here to beat the 8-core CPU (1.38×). ✅ WCC: static bucketing over the T3 active set, 1.26× over T3. ✅ Skew-crossover study: bucketing is measured to be a net *loss* (0.54×) on a uniform-degree graph — the mirror image of T3's diameter crossover.
-- [~] **Phase 6 — Scale & writeup.** ✅ Scale study to 268M edges: every tier at every size from 2¹⁸ to 2²³, showing the CPU/GPU crossover and that naïve CUDA never pays off. ✅ Louvain T1 (OpenMP), with the chunk-count quality/speed ablation and a thread-count-independence test. ✅ Louvain T2 (naïve CUDA, sort-based): faster than the 8-core CPU from 2¹⁶ up, at ~73% of the oracle's modularity — the same figure the CPU ablation predicted for simultaneous updates, on unrelated code and different hardware. ⬜ Louvain T3/T4. ⬜ Cross-dataset generalization on IDS data. ⬜ `docs/` paper draft → arXiv preprint.
+- [~] **Phase 6 — Scale & writeup.** ✅ Scale study to 268M edges: every tier at every size from 2¹⁸ to 2²³, showing the CPU/GPU crossover and that naïve CUDA never pays off. ✅ Louvain T1 (OpenMP), with the chunk-count quality/speed ablation and a thread-count-independence test. ✅ Louvain T2/T3/T4 on the GPU: T4 reaches **10.2× a single core and 1.8× the 8-core CPU** at 2¹⁸, all three returning identical modularity (~73% of the oracle — the figure the CPU ablation predicted for simultaneous updates, reproduced by unrelated code on different hardware). ⬜ Cross-dataset generalization on IDS data. ⬜ `docs/` paper draft → arXiv preprint.
 
 Detailed weekly milestones in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 

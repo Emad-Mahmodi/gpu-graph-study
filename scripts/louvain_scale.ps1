@@ -1,6 +1,8 @@
 # scripts/louvain_scale.ps1
-# How the parallel Louvain tiers behave as the graph grows: T1 (OpenMP) and
-# T2 (naive CUDA) against the T0 oracle, in both speed and community quality.
+# How every parallel Louvain tier behaves as the graph grows: T1 (OpenMP) and
+# T2/T3/T4 (CUDA) against the T0 oracle, in both speed and community quality.
+# The three GPU tiers share an accept rule and therefore a modularity, so the
+# quality column separates CPU from GPU rather than one GPU tier from another.
 #
 # Louvain is the one algorithm in this study whose parallel tier cannot return
 # the oracle's answer (sequential Louvain is order-dependent by construction),
@@ -32,7 +34,8 @@ New-Item -ItemType Directory -Force -Path (Split-Path $Out) | Out-Null
     Out-File -Encoding utf8 $Out
 
 # tier label -> the --tier flag it maps to
-$tiers = [ordered]@{ "T0" = "seq"; "T1" = "openmp"; "T2" = "cuda" }
+$tiers = [ordered]@{ "T0" = "seq"; "T1" = "openmp"; "T2" = "cuda";
+                     "T3" = "cuda_opt"; "T4" = "cuda_lb" }
 
 foreach ($s in $Scales) {
     $t0 = 0.0; $q0 = 0.0

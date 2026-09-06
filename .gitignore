@@ -18,6 +18,7 @@ results/*.csv
 !results/scale_study.csv
 !results/louvain_chunks.csv
 !results/louvain_scale.csv
+!results/louvain_density.csv
 .DS_Store
 *.nsys-rep
 *.ncu-rep

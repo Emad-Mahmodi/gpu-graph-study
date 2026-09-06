@@ -289,6 +289,39 @@ int main() {
             CHECK(std::abs(lg.modularity - ls.modularity) < 1e-9,
                   "CUDA T2 Louvain matches the oracle's Q on the test graph");
         }
+        // T3 and T4 change only how each vertex's weight-per-community is
+        // built -- a global sort, a bit-bounded sort, or a per-vertex hash
+        // table. The accept rule is identical in all three, so on the same
+        // graph they must agree on Q to the last bit. That equality is the
+        // whole basis for comparing their run times, so it is asserted rather
+        // than assumed.
+        {
+            auto g2 = cuda::louvain(big);            // T2, global sort
+            auto g3 = cuda::louvain_opt(big);        // T3, bit-bounded sort
+            auto g4 = cuda::louvain_lb(big);         // T4, degree-bucketed hash
+            CHECK(std::abs(g3.modularity - g2.modularity) < 1e-12,
+                  "CUDA T3 Louvain reproduces T2's modularity exactly");
+            CHECK(std::abs(g4.modularity - g2.modularity) < 1e-12,
+                  "CUDA T4 Louvain reproduces T2's modularity exactly");
+            CHECK(g3.num_communities == g2.num_communities &&
+                  g4.num_communities == g2.num_communities,
+                  "CUDA T2/T3/T4 Louvain agree on the community count");
+            // The two T3 groupings are kept selectable; both must also agree.
+            auto seg = cuda::louvain_opt_variant(big, /*segmented=*/true);
+            CHECK(std::abs(seg.modularity - g2.modularity) < 1e-12,
+                  "CUDA T3 segmented grouping reproduces T2's modularity");
+        }
+        {
+            // T4's hash tables are sized per vertex, so a hub whose degree
+            // exceeds the shared-memory table has to reach the global-table
+            // path. A dense graph puts real traffic through every bucket,
+            // which the sparse default would leave untested.
+            CsrGraph dense = make_rmat(/*scale=*/13, /*ef=*/128, /*seed=*/5);
+            auto d2 = cuda::louvain(dense);
+            auto d4 = cuda::louvain_lb(dense);
+            CHECK(std::abs(d4.modularity - d2.modularity) < 1e-12,
+                  "CUDA T4 Louvain matches T2 on a dense graph (all buckets used)");
+        }
         {
             auto ls = seq::louvain(big);
             auto lg = cuda::louvain(big);

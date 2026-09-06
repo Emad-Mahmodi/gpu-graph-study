@@ -80,13 +80,31 @@ tests, and produces a benchmark row — never a half-finished tier.
       most of the T4 machinery, and building it here would make the later
       speedup unattributable. Beats the 8-core CPU from 2¹⁶ upward (9.31× a
       single core at 2¹⁸) at ~73% of the oracle's modularity.
-- [ ] Louvain T3: restore the incremental visibility that took T1 from 72.6% to
-      93.6% quality, without giving up the GPU's parallelism
-- [ ] Louvain T4: degree-bucketed accumulator sizing. Note this was originally
-      marked "not applicable" — wrongly. Louvain needs a per-vertex accumulator
-      over *distinct neighbouring communities*, whose size is set by degree, so
-      bucketing is the precondition for using shared memory here rather than an
-      optimization on top.
+- [x] Louvain T3 (optimized CUDA). Two groupings were built and measured
+      against each other rather than argued about: a cub *segmented* sort, one
+      segment per CSR row, which **lost** at 0.46–0.57× because segmented radix
+      sort pays per segment and this graph has hundreds of thousands of them
+      averaging 32 entries; and a global sort bounded to the bits a
+      (vertex, community) key can occupy, which won by 1.02–1.12×. Both are
+      kept selectable so the comparison stays reproducible.
+- [x] Louvain T4 (degree-bucketed hash tables). Originally marked "not
+      applicable" — wrongly, and the GPU work is what proved it. 10.22× a single
+      core and 1.80× the 8-core CPU at 2¹⁸.
+- [ ] Louvain aggregation. The phase profile puts it at 35% of T4's run and it
+      is now the largest untouched cost; it is the same code in every tier,
+      which is what makes the tier-to-tier comparisons clean.
+- **Method note:** two T3 attempts optimized the grouping phase and neither
+      moved the total, so the tiers were instrumented per phase
+      (`GGS_LOUVAIN_PROFILE=1`) instead of tuned further on instinct. Grouping
+      was 68% of T2 and is 51% of T4 (277.5 → 131.5 ms), with aggregation flat
+      at 91/92/90 ms across tiers as the control.
+- **Negative result worth keeping:** T4's first version sized its hash table by
+      degree *bucket* and looked like a wash on the default graph. A density
+      sweep found it degrading to **0.44×** at average degree 256 — clearing and
+      scanning cost capacity, not degree, so a degree-100 vertex in the fixed
+      2048-slot bucket paid 20× for nothing. The bucket picks the hardware; the
+      vertex's own degree has to pick the capacity. `scripts/louvain_density.ps1`
+      exists because the failure is invisible at the default density.
 - [ ] Cross-dataset generalization on IDS graphs (CICIDS→UNSW), mirroring ref [1]
 - [ ] `docs/paper/` draft; figures auto-generated from `results/`
 - **Milestone:** arXiv-ready preprint + a repo any reviewer can reproduce.
@@ -100,12 +118,14 @@ tests, and produces a benchmark row — never a half-finished tier.
   tested (it only reaches the CPU at 268M, where the optimized tiers are already
   at 1.6–2.0×), and WCC's crossover sits just past what a 4 GB card can hold.
   Louvain is the one algorithm whose parallel tiers cannot reproduce the oracle.
-  T1 trades ~6% of modularity for 3.6–6.5×. T2 is faster still — 9.31× a single
-  core, beating the 8-core CPU from 2¹⁶ up — but at ~73% of the oracle's
-  modularity, and the two numbers are never quoted apart. The 73% is the same
-  figure the CPU chunk ablation measured for pure simultaneous updates (72.6%),
-  reproduced by unrelated code on different hardware: the loss belongs to the
-  formulation, not to an implementation.
+  T1 trades ~6% of modularity for 2.3–5.7×. The GPU tiers are faster still —
+  T4 reaches 10.22× a single core and 1.80× the 8-core CPU at 2¹⁸ — but all
+  three sit at ~73% of the oracle's modularity, and the speed is never quoted
+  apart from that. The 73% is the same figure the CPU chunk ablation measured
+  for pure simultaneous updates (72.6%), reproduced by unrelated code on
+  different hardware: the loss belongs to the formulation, not to an
+  implementation. Because T2, T3 and T4 share an accept rule they return
+  *identical* modularity, so their run times compare directly.
 
 ## Ground rules (kept every phase)
 1. Nothing merges unless it builds and `ctest` is green.

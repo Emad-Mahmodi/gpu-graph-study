@@ -41,6 +41,7 @@ struct Args {
     VertexId    source = 0;
     int         repeats = 10;
     bool        symmetrize = true;   // undirected by default for wcc/pagerank
+    std::string louvain_group;       // T3 grouping: "segmented" or "bounded"
 };
 
 Args parse(int argc, char** argv) {
@@ -61,6 +62,7 @@ Args parse(int argc, char** argv) {
         else if (k == "--source") a.source = static_cast<VertexId>(std::stoul(next()));
         else if (k == "--repeats")a.repeats = std::stoi(next());
         else if (k == "--directed") a.symmetrize = false;
+        else if (k == "--louvain-group") a.louvain_group = next();
         else if (k == "--help") {
             std::cout << "see header of apps/run_bench.cpp for usage\n";
             std::exit(0);
@@ -121,12 +123,6 @@ int main(int argc, char** argv) {
     }
 #endif
 
-    // Louvain has a naive GPU tier (T2) but no T3/T4 yet.
-    if ((cuda_opt_tier || cuda_lb_tier) && a.algo == "louvain") {
-        std::cerr << "louvain has tiers seq, openmp and cuda; T3/T4 are not implemented yet.";
-        std::cerr << std::endl;
-        return 3;
-    }
 
     if (a.algo == "bfs") {
         std::vector<std::int32_t> dist;
@@ -175,7 +171,11 @@ int main(int argc, char** argv) {
             if (seq_tier)      lr = seq::louvain(g);
             else if (omp_tier) lr = omp::louvain(g);    // T1
 #ifdef HAVE_CUDA
-            else               lr = cuda::louvain(g);   // T2
+            else if (cuda_tier) lr = cuda::louvain(g);       // T2
+            else if (!a.louvain_group.empty())               // T3, ablation
+                lr = cuda::louvain_opt_variant(g, a.louvain_group == "segmented");
+            else if (cuda_opt_tier) lr = cuda::louvain_opt(g);  // T3, shipped choice
+            else                lr = cuda::louvain_lb(g);        // T4
 #endif
         }, a.repeats);
         char buf[96];
