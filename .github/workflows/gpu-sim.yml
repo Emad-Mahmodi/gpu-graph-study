@@ -1,0 +1,68 @@
+name: GPU Simulator
+
+# Optional, non-required check. The hosted runners have no GPU, so this builds
+# the CUDA tiers and runs the correctness test on a simulated NVIDIA H100
+# (https://github.com/pantheongpu/pantheonsim). A simulator cannot reproduce
+# hardware-specific behavior or timing, so it complements real-GPU testing and
+# does not replace it.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "core/**"
+      - "tests/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/gpu-sim.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    name: Correctness test (CUDA 13.0 and simulated H100)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      - name: Set up the simulated GPU and CUDA toolkit
+        uses: pantheongpu/setup-pantheonsim@deff5781e8adfd83dec98dd5242dcbc96a564773 # v0.1.10
+        with:
+          gpu: nvidia/h100
+          cuda-toolkit: "13.0"
+
+      # CMakeLists.txt pins the CUDA architecture to 75 (a Turing card), so it
+      # is changed to 90-virtual here: PTX only, which the simulator runs. The
+      # simulator also needs a shared CUDA runtime.
+      - name: Configure
+        run: |
+          sed -i 's/CUDA_ARCHITECTURES 75/CUDA_ARCHITECTURES 90-virtual/' CMakeLists.txt
+          grep -q 'CUDA_ARCHITECTURES 90-virtual' CMakeLists.txt
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_RUNTIME_LIBRARY=Shared
+          grep -q 'CUDA found' <(cmake -S . -B build 2>&1)
+
+      - name: Build
+        run: vgpu run --preload cmake --build build -j3 --target test_correctness
+
+      # The test skips the CUDA tiers when no device is found and still exits 0,
+      # so the output is checked for the CUDA section and its checks.
+      - name: Test
+        run: |
+          set -o pipefail
+          vgpu run ./build/test_correctness 2>&1 | tee out.txt
+          grep -q '^\[CUDA\] device:' out.txt
+          grep -q '^ok:   CUDA T2 BFS matches sequential BFS' out.txt
+          grep -q '^ok:   CUDA T4 BFS matches sequential BFS' out.txt
+          grep -q '^ok:   CUDA T4 PageRank matches sequential' out.txt
+          grep -q '^ALL TESTS PASSED' out.txt
+          if grep -Ei '^FAIL:|TESTS FAILED|VirtualGPU error|no device|GPU tiers not tested' out.txt; then exit 1; fi
